@@ -180,8 +180,9 @@ private:
     // One small upload buffer per frame queued; the presentation ring holds three
     // lists, so a fourth slot is never still being read when it is rewritten.
     static constexpr unsigned kDoviTableSlots = 4;
-    // 257 floats rounded up to the 256-byte CBV alignment every slot needs.
-    static constexpr unsigned kDoviTableSlotBytes = 1280;
+    // 257 expansion entries + 65 hue entries + 4 colour scalars, rounded up to the
+    // 256-byte CBV alignment every slot needs (custom, 完整 C).
+    static constexpr unsigned kDoviTableSlotBytes = 1344;
     static constexpr unsigned kDoviTableFloatsPerSlot = kDoviTableSlotBytes / sizeof(float);
     Microsoft::WRL::ComPtr<ID3D12Resource> doviTable_;
     float* doviTableMapped_ = nullptr;

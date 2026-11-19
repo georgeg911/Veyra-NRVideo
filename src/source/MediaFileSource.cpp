@@ -495,8 +495,10 @@ bool MediaFileSource::feedEnhancementLayer(const AVPacket* packet) {
     }
 
     // Custom (完整 C): the creative anchors ride on the base packet, whatever the
-    // enhancement layer does, so parse them before any early return.
-    parseCm4FromBasePacket(packet);
+    // enhancement layer does, so parse them before any early return. Throttled: a
+    // full libdovi parse per frame is measurable next to the P7 reconstruction, and
+    // L2 only moves when the scene does.
+    if ((sequence_ % 15) == 1) parseCm4FromBasePacket(packet);
     if (!elLayerEnabled_ || packet == nullptr || packet->data == nullptr || packet->size <= 0) return true;
     // The enhancement layer is sparse by design here: only about half the base
     // frames carry one, in a repeating pattern. An empty packet is normal, and it
@@ -1414,6 +1416,14 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
         }
     }
     out.dovi = doviFrameInfo;
+    if (std::getenv("VEYRA_DOVI_TRACE") != nullptr) {
+        static int l1Reported = 0;
+        if (l1Reported < 3) {
+            ++l1Reported;
+            log::info("source-dovi-l1", std::format("present={} valid={} maxPq={:.4f} eps={}",
+                dv.present ? 1 : 0, doviFrameInfo.valid ? 1 : 0, doviFrameInfo.maxPq, sequence_));
+        }
+    }
     // Custom (P5): hand the enhancement layer to whoever renders this frame. Null
     // for the base frames that carry none, which the reconstruction treats as zero
     // residual, and null entirely unless the EL path is enabled.
@@ -1455,6 +1465,9 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
             if (metaFromEnhancementLayer || elCm4Usable) doviFrameInfo.cm4 = elDoviCm4_;
             else if (baseCm4Valid_) doviFrameInfo.cm4 = baseCm4_;
             else fillDoviCm4FromFfmpeg(*metaPtr, doviFrameInfo.cm4);
+            // out.dovi was copied above, before this block ran; carry the anchors
+            // into the packet that the presenter actually receives.
+            out.dovi.cm4 = doviFrameInfo.cm4;
             if (!cm4Reported_ && doviFrameInfo.cm4.valid()) {
                 cm4Reported_ = true;
                 const auto& anchors = doviFrameInfo.cm4;

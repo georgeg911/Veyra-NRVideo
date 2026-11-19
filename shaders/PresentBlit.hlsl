@@ -34,7 +34,54 @@ cbuffer PresentBlitConstants : register(b0)
 cbuffer DoviExpansionTable : register(b1)
 {
     float4 doviExtra[65];   // 260 floats; entries 0..256 are used
+    // Custom (完整 C): CB1's colour restraint. The 65-point circular hue table
+    // follows the expansion entries, then the two global coefficients.
+    float4 doviHue[17];     // 65 floats used
+    float4 doviColor;       // x=chroma, y=saturation, z=1 when the table is live
 };
+
+float DoviHueAt(int k)
+{
+    const float4 v = doviHue[k >> 2];
+    const int lane = k & 3;
+    return lane == 0 ? v.x : (lane == 1 ? v.y : (lane == 2 ? v.z : v.w));
+}
+
+// ST2084 encode, matching cm4NitsToPq on the CPU side.
+float DoviPq(float nits)
+{
+    const float y = pow(saturate(nits / 10000.0), 2610.0 / 16384.0);
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 2523.0 / 32.0);
+}
+
+// CB1's chroma gate. The lift is one luminance gain across all three channels, so
+// a saturated highlight would carry its colour past what the display can show.
+// Returns the fraction of the lift that survives, bounded to [0.65, 1]; neutral
+// greys bypass the transform, exactly like doviColorRestraint() on the CPU.
+float DoviColorRestraint(float3 nits, float masterNits)
+{
+    if (doviColor.z < 0.5) return 1.0;
+    if (all(nits == nits.rrr)) return 1.0;
+    static const float3x3 rgb2lms = {
+        0.4122214708, 0.5363325363, 0.0514459929,
+        0.2119034982, 0.6806995451, 0.1073969566,
+        0.0883024619, 0.2817188376, 0.6299787005
+    };
+    const float3 lms = mul(rgb2lms, max(nits, 0.0));
+    const float3 v = float3(DoviPq(lms.x), DoviPq(lms.y), DoviPq(lms.z));
+    const float intensity = dot(v, float3(0.4, 0.4, 0.2));
+    if (!(intensity > 1e-6)) return 1.0;
+    const float ct = dot(v, float3(4.455, -4.851, 0.396));
+    const float cp = dot(v, float3(0.8056, 0.3572, -1.1628));
+    const float gate = smoothstep(0.0, 0.15, length(float2(ct, cp)) / intensity);
+    const float z = saturate(intensity / DoviPq(masterNits));
+    const float pos = (atan2(cp, ct) + 3.14159265) / 6.2831853 * 64.0;
+    const int idx = min(int(pos), 63);
+    const float frac = saturate(pos - float(idx));
+    const float hue = lerp(DoviHueAt(idx), DoviHueAt(idx + 1), frac);
+    const float severity = doviColor.x * abs(2.0 * z - 1.0) + doviColor.y + hue;
+    return max(0.65, 1.0 / (1.0 + 0.5 * gate * severity));
+}
 
 float DoviExtraAt(int k)
 {
@@ -61,8 +108,10 @@ float3 DoviExpand(float3 nits, float4 dvp)
     if (y > dvp.x * 1.001) return nits;
     const float u = saturate((y - 10.0) / max(dvp.x - 10.0, 1e-3)) * 256.0;
     const int index = min(int(u), 255);
-    const float extra = lerp(DoviExtraAt(index), DoviExtraAt(index + 1), u - float(index));
+    float extra = lerp(DoviExtraAt(index), DoviExtraAt(index + 1), u - float(index));
     if (!(extra > 0.0)) return nits;
+    // Custom (完整 C): CB1 applies the colour gate before the soft knee.
+    extra *= DoviColorRestraint(nits, dvp.x);
     // The knee is measured on the brightest channel, so a saturated highlight is
     // protected exactly like a neutral one.
     const float peak = max(max(nits.r, nits.g), nits.b);

@@ -158,18 +158,25 @@ inline void buildDoviCm4ColorTable(const DoviCm4Info& info,
     const auto accumulate = [&](const DoviCm4Anchor& a, double weight) {
         if (!(weight > 0.0)) return;
         any = true;
-        // CB1 reads the magnitudes as log2 ratios around unity; the L8 fields are
-        // unsigned deviations, so map 0..127 to a symmetric log2 magnitude.
-        const double chromaW = std::fabs(std::log2(std::max(double(a.trimChromaWeight) / 128.0, 1e-3)));
-        const double satW = std::fabs(std::log2(std::max(double(a.trimSaturationGain) / 128.0, 1e-3)));
-        chroma += weight * chromaW;
-        saturation += weight * satW;
+        // trim_slope/offset/power/chroma_weight/saturation_gain are 12-bit words
+        // centred on 2048 (1.0); the six per-secondary vectors are 8-bit bytes
+        // centred on 128. CB1 reads the magnitudes as log2 ratios around unity,
+        // so a neutral anchor contributes exactly zero and the gate stays off.
+        const auto log2Ratio = [](double value, double centre) {
+            return std::fabs(std::log2(std::max(value / centre, 1e-3)));
+        };
+        chroma += weight * log2Ratio(double(a.trimChromaWeight), 2048.0);
+        saturation += weight * log2Ratio(double(a.trimSaturationGain), 2048.0);
         for (int j = 0; j < 6; ++j) {
-            const double sv = double(a.saturationVector[std::size_t(j)]) / 128.0;
-            const double hv = double(a.hueVector[std::size_t(j)]) / 128.0;
-            gain[std::size_t(j)] += weight * std::fabs(std::log2(std::max(sv, 1e-3)));
-            rotation[std::size_t(j)] += weight * std::fabs(hv) * 12.0;  // pi/12 units
-            centre[std::size_t(j)] += weight * (double(j) * kStep - 3.141592653589793);
+            const auto idx = std::size_t(j);
+            // Secondary saturation: an unsigned byte around 128.
+            const double sv = double(a.saturationVector[idx]);
+            gain[idx] += weight * log2Ratio(sv > 0.0 ? sv : 1.0, 128.0);
+            // Rotation: deviation from neutral, in units of pi/12 as the contract
+            // specifies.
+            rotation[idx] += weight * std::fabs(double(a.hueVector[idx]) - 128.0) / 128.0;
+            // The six secondaries sit on 60-degree spokes.
+            centre[idx] += weight * (double(j) * kStep - 3.141592653589793);
         }
     };
     accumulate(*selection.nearAnchor, selection.nearWeight);

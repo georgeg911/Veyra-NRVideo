@@ -18,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "veyra/pipeline/DoviCm4.h"
+
 namespace veyra::pipeline {
 
 // Number of table entries the shader samples (last index = 256).
@@ -36,6 +38,14 @@ struct DoviExpansionPlan {
     double sourcePeakNits = 0.0;
     double displayPeakNits = 0.0;
     bool active = false;
+    // Custom (完整 C): CB1's colour restraint, from the CM anchors. False for a
+    // stream that carries L1 only, which leaves the expansion exactly as it was
+    // before CM4 existed. `hue` is the 65-point circular table (k = 0..64 over
+    // [-pi, pi]); `chroma`/`saturation` are the two global coefficients.
+    std::array<float, 65> hue{};
+    float chroma = 0.0f;
+    float saturation = 0.0f;
+    bool colorValid = false;
 };
 
 namespace detail {
@@ -56,7 +66,8 @@ inline double smoothstepRange(double lo, double hi, double x) {
 // caps how far the expansion may reach, so a dark scene is not pushed to the
 // display peak. `amount` combines the highlight level (CB1's smooth(100,400))
 // with the midtone share (1 - 0.5*smooth(0.04,0.30)).
-inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in) {
+inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in,
+                                            const DoviCm4Info* cm4 = nullptr) {
     DoviExpansionPlan plan;
     if (!in.valid || !(in.sourcePeakNits > 10.0) || in.sourcePeakNits > 10000.0 ||
         !(in.displayPeakNits > 10.0)) {
@@ -100,6 +111,23 @@ inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in) {
         active = active || value > 0.0;
     }
     plan.active = active;
+    // Custom (完整 C): colour restraint. The anchors are resolved against the
+    // display peak the expansion was sized for, exactly as CB1 resolves them
+    // against the configured target.
+    if (cm4 != nullptr && cm4->valid() && active) {
+        const uint16_t displayPq = uint16_t(std::lround(cm4NitsToPq(plan.displayPeakNits) * 4095.0));
+        const auto selection = selectDoviCm4Anchors(*cm4, displayPq);
+        if (selection.valid()) {
+            DoviCm4ColorTable table;
+            buildDoviCm4ColorTable(*cm4, selection, table);
+            if (table.valid) {
+                plan.colorValid = true;
+                plan.chroma = float(table.chroma);
+                plan.saturation = float(table.saturation);
+                for (int k = 0; k < 65; ++k) plan.hue[std::size_t(k)] = float(table.hue[std::size_t(k)]);
+            }
+        }
+    }
     return plan;
 }
 
@@ -126,6 +154,16 @@ inline void transitionDoviExpansion(DoviExpansionPlan& plan,
         const auto idx = std::size_t(k);
         plan.extra[idx] = float(previous.extra[idx] +
                                 (plan.extra[idx] - previous.extra[idx]) * alpha);
+    }
+    // Custom (完整 C): CB1 eases the colour table by the same alpha, so a cut
+    // cannot snap the restraint from one hue layout to another.
+    if (plan.colorValid && previous.colorValid) {
+        for (int k = 0; k < 65; ++k) {
+            const auto idx = std::size_t(k);
+            plan.hue[idx] = float(previous.hue[idx] + (plan.hue[idx] - previous.hue[idx]) * alpha);
+        }
+        plan.chroma = float(previous.chroma + (plan.chroma - previous.chroma) * alpha);
+        plan.saturation = float(previous.saturation + (plan.saturation - previous.saturation) * alpha);
     }
 }
 
@@ -155,8 +193,44 @@ inline double doviTableAt(const DoviExpansionPlan& plan, double nits) {
            double(plan.extra[std::size_t(index + 1)]) * fraction;
 }
 
-// CB1's cb1_dv_enhanced_pixel without the CM4 hue retention (Veyra has no L2/L8
-// anchors): lift the BT.2020 luminance by the table's entry, convert that lift to
+// CB1's chroma gate: the lift is one luminance gain across all three channels, so
+// a saturated highlight would carry its colour past what the display can show.
+// This returns the fraction of the lift that survives, bounded to [0.65, 1] as
+// CB1 does. Neutral greys bypass the transform entirely.
+inline double doviColorRestraint(const DoviExpansionPlan& plan, const double rgb[3]) {
+    if (!plan.colorValid || !(plan.sourcePeakNits > 10.0)) return 1.0;
+    if (rgb[0] == rgb[1] && rgb[1] == rgb[2]) return 1.0;
+    // BT.2020 RGB -> LMS (the standard IPT matrix libplacebo uses) -> PQ, then
+    // IPT's intensity/opponent channels.
+    static constexpr double kRgb2Lms[3][3] = {
+        {0.4122214708, 0.5363325363, 0.0514459929},
+        {0.2119034982, 0.6806995451, 0.1073969566},
+        {0.0883024619, 0.2817188376, 0.6299787005},
+    };
+    double v[3];
+    for (int j = 0; j < 3; ++j) {
+        const double lms = kRgb2Lms[j][0] * rgb[0] + kRgb2Lms[j][1] * rgb[1] + kRgb2Lms[j][2] * rgb[2];
+        v[j] = cm4NitsToPq(std::max(lms, 0.0));
+    }
+    const double intensity = 0.4 * v[0] + 0.4 * v[1] + 0.2 * v[2];
+    if (!(intensity > 1e-9)) return 1.0;
+    const double ct = 4.455 * v[0] - 4.851 * v[1] + 0.396 * v[2];
+    const double cp = 0.8056 * v[0] + 0.3572 * v[1] - 1.1628 * v[2];
+    const double gate = detail::smoothstepRange(0.0, 0.15, std::hypot(ct, cp) / intensity);
+    const double z = std::clamp(intensity / cm4NitsToPq(plan.sourcePeakNits), 0.0, 1.0);
+    // 65-point circular lookup: the table spans [-pi, pi] in 64 steps.
+    const double pos = (std::atan2(cp, ct) + 3.141592653589793) / 6.283185307179586 * 64.0;
+    const int index = std::min(int(pos), 63);
+    const double fraction = std::clamp(pos - double(index), 0.0, 1.0);
+    const double hue = double(plan.hue[std::size_t(index)]) * (1.0 - fraction) +
+                       double(plan.hue[std::size_t(index + 1)]) * fraction;
+    const double severity = double(plan.chroma) * std::fabs(2.0 * z - 1.0) +
+                            double(plan.saturation) + hue;
+    return std::max(0.65, 1.0 / (1.0 + 0.5 * gate * severity));
+}
+
+// CB1's cb1_dv_enhanced_pixel: lift the BT.2020 luminance by the table's entry,
+// convert that lift to
 // a ratio of the pixel's own luminance, then bound the ratio with a soft knee so
 // the result approaches `plan.displayPeakNits` instead of overshooting it.
 inline void doviExpandRgb(const DoviExpansionPlan& plan, const double in[3], double out[3]) {
@@ -165,8 +239,11 @@ inline void doviExpandRgb(const DoviExpansionPlan& plan, const double in[3], dou
     // BT.2020 luminance weights, identical to the shader's.
     const double y = 0.2627 * in[0] + 0.6780 * in[1] + 0.0593 * in[2];
     if (!(y > 10.0)) return;
-    const double extra = doviTableAt(plan, y);
+    double extra = doviTableAt(plan, y);
     if (!(extra > 0.0)) return;
+    // Custom (完整 C): the colour gate applies before the soft knee, exactly where
+    // CB1 applies it.
+    extra *= doviColorRestraint(plan, in);
     const double peak = std::max({in[0], in[1], in[2]});
     const double headroom = std::max(0.0, plan.displayPeakNits / std::max(peak, 1e-3) - 1.0);
     const double knee = 0.9 * headroom, width = 0.1 * headroom;

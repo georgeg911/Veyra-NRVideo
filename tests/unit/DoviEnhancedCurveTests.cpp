@@ -188,6 +188,68 @@ int main() {
               "one second of easing reaches the new table");
     }
 
+    // ---- 11) colour restraint: neutral anchors do nothing, trimmed ones do ----
+    {
+        DoviCm4Info cm4;
+        cm4.count = 1;
+        auto& anchor = cm4.anchors[0];
+        anchor.targetMaxPq = uint16_t(std::lround(cm4NitsToPq(1000.0) * 4095.0));
+
+        // A neutral anchor (all trim words at their centre) must leave the lift
+        // alone even though the table is "present": that is the common CM v2.9
+        // case where L2 exists but carries no creative trim.
+        anchor.trimChromaWeight = 2048;
+        anchor.trimSaturationGain = 2048;
+        for (int j = 0; j < 6; ++j) { anchor.saturationVector[std::size_t(j)] = 128; anchor.hueVector[std::size_t(j)] = 128; }
+        anchor.fromLevel8 = true;
+        {
+            DoviExpansionInput in;
+            in.sourcePeakNits = 300.0; in.sceneAvgNits = 60.0; in.displayPeakNits = 1000.0; in.valid = true;
+            const auto plan = buildDoviExpansion(in, &cm4);
+            check(plan.active && plan.colorValid, "neutral anchor: the table is carried");
+            const double rgb[3] = {400.0, 200.0, 60.0};
+            check(close(doviColorRestraint(plan, rgb), 1.0, 1e-9),
+                  "neutral anchor: restraint is exactly one");
+        }
+
+        // A saturated, trimmed anchor must restrain the lift, and never below
+        // CB1's 0.65 floor.
+        anchor.trimChromaWeight = 3200;
+        anchor.trimSaturationGain = 3200;
+        for (int j = 0; j < 6; ++j) { anchor.saturationVector[std::size_t(j)] = 220; anchor.hueVector[std::size_t(j)] = 240; }
+        {
+            DoviExpansionInput in;
+            in.sourcePeakNits = 300.0; in.sceneAvgNits = 60.0; in.displayPeakNits = 1000.0; in.valid = true;
+            const auto plan = buildDoviExpansion(in, &cm4);
+            check(plan.active && plan.colorValid, "trimmed anchor: the table is carried");
+            const double tinted[3] = {400.0, 120.0, 40.0};
+            const double restraint = doviColorRestraint(plan, tinted);
+            check(restraint < 1.0, "trimmed anchor: a saturated pixel is restrained");
+            check(restraint >= 0.65 - 1e-9, "restraint never drops below the 0.65 floor");
+            // Neutral grey bypasses the transform by contract.
+            const double grey[3] = {300.0, 300.0, 300.0};
+            check(close(doviColorRestraint(plan, grey), 1.0, 1e-9),
+                  "neutral grey bypasses the colour restraint");
+            // And the restrained pixel really receives less lift than the grey one.
+            double tintedOut[3], greyOut[3];
+            doviExpandRgb(plan, tinted, tintedOut);
+            doviExpandRgb(plan, grey, greyOut);
+            const double tintedGain = tintedOut[0] / tinted[0];
+            const double greyGain = greyOut[0] / grey[0];
+            check(tintedGain < greyGain, "a saturated pixel is lifted less than a neutral one");
+        }
+    }
+
+    // ---- 12) no anchors: the restraint is the identity ----
+    {
+        DoviExpansionInput in;
+        in.sourcePeakNits = 300.0; in.sceneAvgNits = 60.0; in.displayPeakNits = 1000.0; in.valid = true;
+        const auto plan = buildDoviExpansion(in, nullptr);
+        check(plan.active && !plan.colorValid, "no anchors: expansion without a colour table");
+        const double rgb[3] = {400.0, 120.0, 40.0};
+        check(close(doviColorRestraint(plan, rgb), 1.0, 1e-9), "no anchors: restraint is one");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "OK", failures,
                 failures == 1 ? "" : "s");
     return failures ? 1 : 0;

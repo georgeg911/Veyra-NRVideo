@@ -296,6 +296,15 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     // unless the switch is on: the delivered image is unchanged otherwise.
     // VEYRA_DOVI_FOLLOW stays as a test override while the switch is checked.
     const bool followDovi=latestDovi_.valid&&(graph.doviFollow()||std::getenv("VEYRA_DOVI_FOLLOW")!=nullptr);
+    if(std::getenv("VEYRA_DOVI_TRACE")!=nullptr){
+        static int gateTrace=0;
+        if(gateTrace<3){
+            ++gateTrace;
+            veyra::log::info("dovi-gate",std::format("valid={} follow={} enhanced={} hdrOut={} curve={} maxPq={:.4f}",
+                latestDovi_.valid?1:0,graph.doviFollow()?1:0,graph.doviEnhanced()?1:0,
+                graph.hdrOutput()?1:0,hdrCurve.enabled?1:0,latestDovi_.maxPq));
+        }
+    }
     // Average brightness, smoothed over ~0.5 s so the knee does not breathe with
     // every frame. A large jump (scene change) resets the window instead of
     // dragging the old value along.
@@ -368,7 +377,8 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
             in.sceneAvgNits=engine::pqToNits(smoothedAvgPq>0.0?smoothedAvgPq:latestDovi_.avgPq);
             in.displayPeakNits=doviCeilingNits;
             in.valid=doviMasterNits>10.0;
-            auto plan=pipeline::buildDoviExpansion(in);
+            // Custom (完整 C): the frame's CM anchors drive the colour restraint.
+            auto plan=pipeline::buildDoviExpansion(in,&latestDovi_.cm4);
             // CB1's bounded transition: no table may move faster than half the
             // headroom per second, so a cut cannot flash the expansion.
             const auto now=std::chrono::steady_clock::now();
@@ -380,6 +390,13 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
                 const unsigned tableSlot=doviTableSlot_;
                 float* dst=doviTableMapped_+size_t(tableSlot)*kDoviTableFloatsPerSlot;
                 for(int k=0;k<pipeline::kDoviExtraEntries;++k)dst[k]=plan.extra[std::size_t(k)];
+                // Custom (完整 C): the colour restraint lives in the same buffer,
+                // right after the 257 expansion entries (floats 257..259 are pad).
+                float* hue=dst+pipeline::kDoviExtraEntries+3;   // 260
+                for(int k=0;k<65;++k)hue[k]=plan.colorValid?plan.hue[std::size_t(k)]:0.0f;
+                hue[65]=plan.colorValid?plan.chroma:0.0f;
+                hue[66]=plan.colorValid?plan.saturation:0.0f;
+                hue[67]=plan.colorValid?1.0f:0.0f;
                 doviTableSlot_=(doviTableSlot_+1)%kDoviTableSlots;
                 doviTableBound_=tableSlot;
                 doviExpansionActive=true;
@@ -403,9 +420,10 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         static int doviExpandCount=0;
         if(doviExpandCount<3||doviExpandCount%200==0)
             veyra::log::info("dovi-expand",std::format(
-                "n={} on={} live={} masterNits={:.1f} ceilingNits={:.1f} amount={:.4f} liftNits={:.1f} tableSlot={}",
+                "n={} on={} live={} masterNits={:.1f} ceilingNits={:.1f} amount={:.4f} liftNits={:.1f} color={} chroma={:.3f} sat={:.3f} tableSlot={}",
                 doviExpandCount,expansionWanted?1:0,doviExpansionActive?1:0,
-                doviMasterNits,doviCeilingNits,doviPlan_.amount,doviLiftNits,doviTableBound_));
+                doviMasterNits,doviCeilingNits,doviPlan_.amount,doviLiftNits,
+                doviPlan_.colorValid?1:0,doviPlan_.chroma,doviPlan_.saturation,doviTableBound_));
         ++doviExpandCount;
     }
     // Custom: smooth the value that actually reaches the blit. Smoothing the peak is
