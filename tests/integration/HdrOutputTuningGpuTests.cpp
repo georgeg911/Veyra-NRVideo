@@ -114,22 +114,42 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
     if(ready)plain=shown;
     settings.doviEnhanced=true;
     const bool expanded=ready&&graph.applySettings(settings)&&present(3);
+    // Keep the expanded readback: the regression below presents again and would
+    // otherwise overwrite `shown`.
+    std::vector<float> expandedShown;
+    if(expanded)expandedShown=shown;
+    // Regression: with no ceiling stated, the expansion must stay off. The first
+    // implementation fell back to the EDID report (10000 nits on almost every
+    // panel with a near-zero black), which turned a 1162-nit master into an
+    // 8837-nit lift - a white picture. `plain` is the identity readback, so the
+    // two must match byte for byte.
+    std::vector<float> noCeiling;
+    bool noCeilingOk=false;
+    {
+        engine::EnhancementSettings bare=settings;
+        bare.hdrCurve.displayPeakNits=0;
+        bare.hdrCurve.peakCapNits=0;
+        noCeilingOk=ready&&graph.applySettings(bare)&&present(4);
+        if(noCeilingOk)noCeiling=shown;
+    }
     int failures=0;
     const auto check=[&](bool ok,const char* label){std::cout<<(ok?"PASS ":"FAIL ")<<label<<std::endl;failures+=!ok;};
     check(ready&&expanded,"graph, presenter and both presentations succeed");
+    check(noCeilingOk&&!noCeiling.empty()&&noCeiling==plain,
+          "no stated ceiling: the EDID 10000-nit report is never used, expansion stays off");
     const auto nitsAt=[&](const std::vector<float>& v,unsigned patch){
         return double(v.at(size_t(patch*4+2)*3))*80.0;
     };
     double lift400=0,lift203=0,lift1000=0,liftDark=0;
-    if(expanded&&plain.size()==shown.size()){
-        lift400=nitsAt(shown,12)-nitsAt(plain,12);   // 400 nits, below the master
-        lift203=nitsAt(shown,11)-nitsAt(plain,11);   // 203 nits, SDR reference white
-        lift1000=nitsAt(shown,13)-nitsAt(plain,13);  // 1000 nits, above the master
-        liftDark=nitsAt(shown,4)-nitsAt(plain,4);    // 1 nit, black end
+    if(expanded&&plain.size()==expandedShown.size()){
+        lift400=nitsAt(expandedShown,12)-nitsAt(plain,12);   // 400 nits, below the master
+        lift203=nitsAt(expandedShown,11)-nitsAt(plain,11);   // 203 nits, SDR reference white
+        lift1000=nitsAt(expandedShown,13)-nitsAt(plain,13);  // 1000 nits, above the master
+        liftDark=nitsAt(expandedShown,4)-nitsAt(plain,4);    // 1 nit, black end
         // The table must be inside the ceiling and monotonic per step.
         bool insideCeiling=true,monotonic=true;double previous=0;
         for(unsigned i=5;i<patches.size();++i){
-            const double value=nitsAt(shown,i);
+            const double value=nitsAt(expandedShown,i);
             insideCeiling=insideCeiling&&value<=1002.0;
             monotonic=monotonic&&value+0.5>=previous;previous=value;
         }
