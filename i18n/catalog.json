@@ -23914,5 +23914,22 @@
    "ja": "；既定は「高」。同時に動かすゲームや重い処理が遅くなる場合は「通常」に変更してください",
    "ko": "; 기본값은 높음입니다. 함께 실행하는 게임이나 무거운 작업이 느려지면 보통으로 바꾸세요."
   }
- ]
+ ,
+  {
+   "zh": "高光扩展",
+   "src": "qml/Veyra/ProDisplayPanel.qml",
+   "zh-TW": "高光擴展",
+   "en": "Highlight expansion",
+   "ja": "ハイライト拡張",
+   "ko": "하이라이트 확장"
+  },
+  {
+   "zh": "按每帧自身的亮度，把片源的高光往「峰值上限」方向抬；母版本身已经比上限亮时不会改变画面。峰值上限为 0（不限制）时无处可抬，需要先给它一个值",
+   "src": "qml/Veyra/ProDisplayPanel.qml",
+   "zh-TW": "按每幀自身的亮度，把片源的高光往「峰值上限」方向抬；母版本身已經比上限亮時不會改變畫面。峰值上限為 0（不限制）時無處可抬，需要先給它一個值",
+   "en": "Raises the source's own highlights toward the peak cap, using each frame's brightness. A master that is already brighter than the cap is left alone; with the cap at 0 (no limit) there is nothing to raise, so set it first.",
+   "ja": "フレームごとの明るさに応じて、ソースのハイライトを「ピーク上限」の方向へ持ち上げます。マスターがすでに上限より明るい場合は変更しません。ピーク上限が 0（無制限）のときは持ち上げる余地がないため、先に値を設定してください。",
+   "ko": "프레임별 밝기에 따라 소스의 하이라이트를 '피크 상한' 방향으로 올립니다. 마스터가 이미 상한보다 밝으면 그대로 둡니다. 피크 상한이 0(무제한)이면 올릴 여지가 없으므로 먼저 값을 설정하십시오."
+  }
+]
 }
