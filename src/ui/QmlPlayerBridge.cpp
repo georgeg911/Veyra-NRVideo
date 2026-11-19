@@ -227,6 +227,13 @@ QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesyst
         followed.doviFollow = true;
         commitHdrTuning(std::move(followed));
     }
+    // The per-pixel expansion is its own preference for the same reason, and is
+    // independent of the follow flag so a session that lost one keeps the other.
+    if (impl_->prefBool("doviEnhanced", false) && !settings().doviEnhanced) {
+        auto expanded = settings();
+        expanded.doviEnhanced = true;
+        commitHdrTuning(std::move(expanded));
+    }
     // The P7 composite is its own preference. It used to be restored inside the
     // doviFollow branch above, so a profile without that flag could never turn it
     // on no matter what the preferences said.

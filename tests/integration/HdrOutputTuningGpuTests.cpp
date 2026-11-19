@@ -3,6 +3,7 @@
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/engine/VideoPresenter.h"
 #include "veyra/engine/EnhancementSettings.h"
+#include "veyra/pipeline/PqTransfer.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/RuntimePaths.h"
@@ -64,12 +65,100 @@ static int videoHdrPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ri
     ring.drainQueue();presenter.close();out={};graph.shutdown();av_frame_free(&frame);if(window)DestroyWindow(window);
     return ok?0:1;
 }
+// Custom (完整 B): the per-pixel Dolby Vision expansion has to reach real pixels.
+//
+// The same 16-step PQ ramp is presented twice - expansion off, then on - and the
+// two readbacks are compared step by step. This is the only check that proves the
+// b1 table upload, the extra root-signature parameter and the shader flag all line
+// up; the unit tests pin the arithmetic, this pins the wiring.
+static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring){
+    constexpr std::array<double,16> patches={0,.005,.05,.5,1,2,5,10,20,50,100,203,400,1000,4000,10000};
+    AVFrame* frame=av_frame_alloc();if(!frame)return 2;
+    frame->width=64;frame->height=16;frame->format=AV_PIX_FMT_YUV420P10LE;
+    frame->color_range=AVCOL_RANGE_MPEG;frame->colorspace=AVCOL_SPC_BT2020_NCL;
+    frame->color_primaries=AVCOL_PRI_BT2020;frame->color_trc=AVCOL_TRC_SMPTE2084;
+    if(av_frame_get_buffer(frame,32)<0){av_frame_free(&frame);return 2;}
+    for(unsigned y=0;y<16;++y)for(unsigned x=0;x<64;++x){
+        reinterpret_cast<uint16_t*>(frame->data[0]+y*frame->linesize[0])[x]=uint16_t(std::lround(64+876*hdrRoundTrip::pq(patches[x/4])));
+        if(!(y%2)&&!(x%2))for(unsigned c=1;c<3;++c)reinterpret_cast<uint16_t*>(frame->data[c]+y/2*frame->linesize[c])[x/2]=512;
+    }
+    pipeline::EnhanceGraph graph(ctx,ring);pipeline::EnhanceGraphDesc gd;
+    gd.sourceWidth=gd.workWidth=64;gd.sourceHeight=gd.workHeight=16;
+    gd.hdrInput=gd.hdrOutput=true;gd.noFeatures=gd.noNgx=true;gd.enableNr=gd.enableSr=gd.enableFg=false;
+    gd.hdrOutputMode=engine::HdrOutputMode::ScRgb;
+    gd.hdrCurve.displayPeakNits=1000;
+    pipeline::EnhanceGraph::FrameOutputs output;std::vector<float> raw;
+    bool ready=graph.initialize(gd)&&graph.createViews()&&graph.process(frame,0,true,output,1)&&
+        hdrRoundTrip::read(ctx,ring,graph.videoFrameResource(output.videoSlot),raw);
+    HWND window=CreateWindowExW(0,L"STATIC",L"DV expansion diagnostic",WS_POPUP,0,0,64,16,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    engine::VideoPresenter presenter;
+    ready=ready&&window&&presenter.open(ctx,window,graph);
+    std::vector<float> shown;
+    const auto present=[&](uint64_t epoch){
+        bool ok=presenter.present(ctx,ring,graph,output.videoSlot,false,true,0,false,.5f,{epoch,1,1});
+        auto buffer=presenter.presentedResourceForTest();
+        ok=ok&&hdrRoundTrip::read(ctx,ring,buffer.Get(),shown);buffer.Reset();return ok;
+    };
+    // A 443-nit DV master (a typical streaming P5/P8 grade) under a 1000-nit
+    // ceiling: exactly the case CB1's expansion exists for.
+    pipeline::DoviFrameInfo dovi;dovi.valid=true;dovi.profile=5;
+    dovi.maxPq=float(pipeline::nitsToPq(442.8));dovi.avgPq=float(pipeline::nitsToPq(40.0));dovi.minPq=0.0f;
+    presenter.setFrameDovi(dovi);
+    engine::EnhancementSettings settings;settings.hdrOutputMode=engine::HdrOutputMode::ScRgb;
+    settings.hdrCurve.enabled=true;settings.hdrCurve.displayPeakNits=1000;
+    // No knee and no cap: this case isolates the expansion, not the curve.
+    settings.hdrCurve.highlightStartNits=0;settings.hdrCurve.rollOffPercent=100;settings.hdrCurve.peakCapNits=0;
+    settings.doviFollow=true;settings.doviEnhanced=false;
+    std::vector<float> plain;
+    ready=ready&&graph.applySettings(settings)&&present(2);
+    if(ready)plain=shown;
+    settings.doviEnhanced=true;
+    const bool expanded=ready&&graph.applySettings(settings)&&present(3);
+    int failures=0;
+    const auto check=[&](bool ok,const char* label){std::cout<<(ok?"PASS ":"FAIL ")<<label<<std::endl;failures+=!ok;};
+    check(ready&&expanded,"graph, presenter and both presentations succeed");
+    const auto nitsAt=[&](const std::vector<float>& v,unsigned patch){
+        return double(v.at(size_t(patch*4+2)*3))*80.0;
+    };
+    double lift400=0,lift203=0,lift1000=0,liftDark=0;
+    if(expanded&&plain.size()==shown.size()){
+        lift400=nitsAt(shown,12)-nitsAt(plain,12);   // 400 nits, below the master
+        lift203=nitsAt(shown,11)-nitsAt(plain,11);   // 203 nits, SDR reference white
+        lift1000=nitsAt(shown,13)-nitsAt(plain,13);  // 1000 nits, above the master
+        liftDark=nitsAt(shown,4)-nitsAt(plain,4);    // 1 nit, black end
+        // The table must be inside the ceiling and monotonic per step.
+        bool insideCeiling=true,monotonic=true;double previous=0;
+        for(unsigned i=5;i<patches.size();++i){
+            const double value=nitsAt(shown,i);
+            insideCeiling=insideCeiling&&value<=1002.0;
+            monotonic=monotonic&&value+0.5>=previous;previous=value;
+        }
+        check(lift400>150.0,"400-nit step is lifted by more than 150 nits");
+        check(lift203>30.0&&lift203<lift400,"SDR white is lifted less than the 400-nit step");
+        check(std::abs(liftDark)<0.5,"the black end is untouched");
+        check(insideCeiling,"no step exceeds the 1000-nit ceiling");
+        check(monotonic,"the expanded ramp stays monotonic");
+        // Deliberately not asserted here: a step above the master peak still moves,
+        // because the presenter widens the roll-off window to the expanded peak so
+        // the lift is not compressed straight back out. The "refuse to expand above
+        // the master" rule itself is pinned by the CPU tests, where the table can
+        // be read without the curve in the way.
+    }else{
+        check(false,"readbacks are comparable");
+    }
+    std::cout<<"DV_EXPAND_EVIDENCE lift400="<<lift400<<" lift203="<<lift203
+        <<" lift1000="<<lift1000<<" liftDark="<<liftDark<<std::endl;
+    ring.drainQueue();presenter.close();output={};graph.shutdown();av_frame_free(&frame);
+    if(window)DestroyWindow(window);
+    return failures?1:0;
+}
 int wmain(int argc,wchar_t** argv){
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;Status status;
     gfx::DeviceContextDesc dd;dd.enableDebugLayer=true;
     if(!ctx.initialize(dd,status)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),4,status))return 2;
     if(argc==2&&std::wstring_view(argv[1])==L"--video-hdr")return videoHdrPreview(ctx,ring);
+    if(argc==2&&std::wstring_view(argv[1])==L"--dovi-expand")return doviExpansionPreview(ctx,ring);
     int failures=0;
     const auto check=[&](bool ok,const char* label){std::cout<<(ok?"PASS ":"FAIL ")<<label<<std::endl;failures+=!ok;};
     constexpr std::array<double,16> patches={0,.005,.05,.5,1,2,5,10,20,50,100,203,400,1000,4000,10000};

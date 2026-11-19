@@ -1675,6 +1675,12 @@ target_include_directories(veyra_hdr_tuning_tests PRIVATE ${CMAKE_CURRENT_SOURCE
 # veyra_base carries /utf-8 and NOMINMAX (PresetLibrary.cpp has Chinese literals and uses std::max).
 target_link_libraries(veyra_hdr_tuning_tests PRIVATE veyra_base)
 target_link_options(veyra_hdr_tuning_tests PRIVATE /STACK:33554432)
+# Custom (完整 B): the header-only Dolby Vision expansion table. No link target
+# needed beyond the toolchain defaults; /utf-8 keeps its Chinese comments sane.
+add_executable(veyra_dovi_enhanced_curve_tests tests/unit/DoviEnhancedCurveTests.cpp)
+target_compile_features(veyra_dovi_enhanced_curve_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_dovi_enhanced_curve_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(veyra_dovi_enhanced_curve_tests PRIVATE /utf-8)
   target_compile_features(veyra_preset_library_tests PRIVATE cxx_std_20)
   target_include_directories(veyra_preset_library_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_preset_library_tests PRIVATE veyra_base)

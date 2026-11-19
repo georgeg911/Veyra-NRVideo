@@ -4554,6 +4554,11 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     if(desc_.doviFollow!=s.doviFollow)
         veyra::log::info("hdr-dovi",std::format("Dolby Vision follow {} -> {}",desc_.doviFollow?"on":"off",s.doviFollow?"on":"off"));
     desc_.doviFollow=s.doviFollow;
+    // Custom (完整 B): also live, for the same reason: the presenter reads it per
+    // frame, so toggling the expansion never rebuilds the graph.
+    if(desc_.doviEnhanced!=s.doviEnhanced)
+        veyra::log::info("hdr-dovi",std::format("Dolby Vision per-pixel expansion {} -> {}",desc_.doviEnhanced?"on":"off",s.doviEnhanced?"on":"off"));
+    desc_.doviEnhanced=s.doviEnhanced;
     if(!(s.color==desc_.color)){
         desc_.color=s.color;
         if(s.color.enabled){

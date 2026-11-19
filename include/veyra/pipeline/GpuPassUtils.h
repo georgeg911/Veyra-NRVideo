@@ -324,9 +324,17 @@ struct GraphicsPass {
     // `constantCount` is the number of 32-bit root constants the pass declares at b0.
     // PresentBlit declares 16 including the optional HDR curve; callers write
     // all 16, including neutral values when the curve flag is off.
+    //
+    // `doviTable` adds a third root parameter: a single CBV root descriptor at b1.
+    // It carries the Dolby Vision per-pixel expansion table (custom, 完整 B). A root
+    // descriptor rather than a heap slot because the table is one tiny buffer the
+    // presenter rewrites every frame, and this pass's heap is already laid out
+    // slot-for-slot across the output pool. Callers that do not opt in get exactly
+    // the previous two-parameter signature, so their PSOs and signatures are
+    // unchanged.
     bool create(ID3D12Device* device, const std::vector<uint8_t>& vs,
                 const std::vector<uint8_t>& ps, UINT heapSlots, DXGI_FORMAT outputFormat=DXGI_FORMAT_R8G8B8A8_UNORM,
-                UINT constantCount=16)
+                UINT constantCount=16, bool doviTable=false)
     {
         if(constantCount==0||constantCount>62)return false;
         D3D12_DESCRIPTOR_RANGE1 srvRange{};
@@ -341,7 +349,7 @@ struct GraphicsPass {
         sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         sampler.ShaderRegister = 0;
         sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_PARAMETER1 rp[2]{};
+        D3D12_ROOT_PARAMETER1 rp[3]{};
         rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         rp[0].Constants.ShaderRegister = 0;
@@ -350,9 +358,17 @@ struct GraphicsPass {
         rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         rp[1].DescriptorTable.NumDescriptorRanges = 1;
         rp[1].DescriptorTable.pDescriptorRanges = &srvRange;
+        UINT parameterCount = 2;
+        if (doviTable) {
+            rp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            rp[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            rp[2].Descriptor.ShaderRegister = 1;
+            rp[2].Descriptor.RegisterSpace = 0;
+            parameterCount = 3;
+        }
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd{};
         rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        rd.Desc_1_1.NumParameters = 2;
+        rd.Desc_1_1.NumParameters = parameterCount;
         rd.Desc_1_1.pParameters = rp;
         rd.Desc_1_1.NumStaticSamplers = 1;
         rd.Desc_1_1.pStaticSamplers = &sampler;

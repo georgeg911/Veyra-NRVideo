@@ -185,6 +185,7 @@ inline pipeline::ResolutionPlan describeStages(const StageRequest& request,const
     // recovery) silently dropped the switch while the curve survived.
     desc.doviFollow=settings.doviFollow;
     desc.doviFollowAverage=settings.doviFollowAverage;
+    desc.doviEnhanced=settings.doviEnhanced;
     desc.hdrOutputMode=settings.hdrOutputMode;
     desc.fgMotion=settings.fgMotion;desc.srMotion=settings.srMotion;desc.nrMotion=settings.nrMotion;
     desc.settingsRevision=settings.revision;

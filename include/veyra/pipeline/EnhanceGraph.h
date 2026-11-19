@@ -119,6 +119,9 @@ struct EnhanceGraphDesc {
     bool doviFollow=false;
     // Custom: also use the frame's average brightness for the knee.
     bool doviFollowAverage=false;
+    // Custom (完整 B): CB1-style per-pixel highlight expansion on top of the
+    // follow curve. Needs doviFollow and HDR output; inert otherwise.
+    bool doviEnhanced=false;
     // RTX Video HDR is an SDR -> HDR stage: it only ever runs for an SDR input,
     // and an HDR source keeps the native HDR path (HDR10 / Dolby Vision) instead of
     // being tone-mapped down first.
@@ -733,6 +736,7 @@ public:
     // Custom: whether the present blit follows the Dolby Vision level 1.
     bool doviFollow() const {return desc_.doviFollow;}
     bool doviFollowAverage() const {return desc_.doviFollowAverage;}
+    bool doviEnhanced() const {return desc_.doviEnhanced;}
     // Custom (P5): the enhancement layer that arrived with the frame in flight,
     // null when this frame has none (the reconstruction then uses zero residual).
     const AVFrame* doviElFrame() const {return doviElFrame_;}

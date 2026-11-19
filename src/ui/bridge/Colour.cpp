@@ -507,6 +507,18 @@ bool QmlPlayerBridge::doviFollowAverage()const{return settings().doviFollowAvera
 void QmlPlayerBridge::setDoviFollowAverage(bool on){
     auto s=settings();if(s.doviFollowAverage==on)return;s.doviFollowAverage=on;
     commitHdrTuning(std::move(s));}
+
+bool QmlPlayerBridge::doviEnhanced()const{return settings().doviEnhanced;}
+
+void QmlPlayerBridge::setDoviEnhanced(bool on){
+    auto s=settings();if(s.doviEnhanced==on)return;s.doviEnhanced=on;
+    // Stored with the shell preferences like the follow flag: it is a viewing
+    // preference, not part of the grade, and it applies from the next frame.
+    auto& i=*impl_;
+    i.prefs[QStringLiteral("doviEnhanced")]=on;
+    if(!i.savePrefs())veyra::log::warn("ui-prefs","dolby vision expansion flag not saved");
+    commitHdrTuning(std::move(s));
+}
 // Danmaku rides the same per-frame tick as the subtitle overlay: it reads the
 // engine's own position, so pause, seek and speed changes need no extra wiring.
 

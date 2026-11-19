@@ -6,9 +6,33 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/sink/ImageExportSink.h"
 #include <cstdlib> // std::getenv (custom: Dolby Vision follow switch)
+#include <cstring> // std::memset (custom: DV expansion table upload buffer)
 #include <array>
 #include <memory>
 namespace veyra::engine {
+// Custom (完整 B): one committed UPLOAD buffer holds every in-flight expansion
+// table. The presenter writes the next slot on the CPU and binds it with a root
+// CBV, so the table never needs a descriptor-heap slot and never touches the
+// output-pool layout the blit's SRV table depends on.
+bool VideoPresenter::ensureDoviTable(ID3D12Device* device){
+    if(doviTable_&&doviTableMapped_)return true;
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width=UINT64(kDoviTableSlotBytes)*kDoviTableSlots;
+    desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;
+    desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const HRESULT hr=device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&doviTable_));
+    if(FAILED(hr)){veyra::log::error("dovi-expand",std::format("expansion table buffer hr=0x{:X}",unsigned(hr)));return false;}
+    doviTable_->SetName(L"Veyra DV expansion table");
+    void* mapped=nullptr;
+    if(FAILED(doviTable_->Map(0,nullptr,&mapped))||!mapped){doviTable_.Reset();return false;}
+    doviTableMapped_=static_cast<float*>(mapped);
+    std::memset(doviTableMapped_,0,size_t(kDoviTableSlotBytes)*kDoviTableSlots);
+    doviTableSlot_=doviTableBound_=0;
+    return true;
+}
 bool VideoPresenter::beginSourceInput(uint64_t stallUs){
     if(!reflexInputFrame_&&reflex_.active())reflexInputFrame_=reflex_.begin(stallUs);
     auto* xess=sink_.xess();if(!xess)return true;
@@ -42,6 +66,11 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     refreshMonitor_=nullptr;
     hdrPeakInfo_={};
     latestDovi_={}; // A new chain never inherits the previous source's RPU.
+    // Custom (完整 B): a new chain starts the expansion from scratch; keeping the
+    // old table would expand the first frames of the new source.
+    if(doviTableMapped_)std::memset(doviTableMapped_,0,size_t(kDoviTableSlotBytes)*kDoviTableSlots);
+    doviTableSlot_=doviTableBound_=0;
+    doviPlan_={};doviPreviousPlan_={};doviPlanTemporal_=false;doviPlanStamp_={};doviExpansionLive_=false;
     smoothedStartNits_=0.0f;
     avgEmaSeeded_=false; peakEmaSeeded_=false;
     ++generation_;
@@ -97,7 +126,12 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     std::vector<uint8_t> vs,ps;
     // The output pool contains both parities of every generated subframe.
     // Comparison references follow it; derive offsets to cover VFG through 8X.
-    if(!pipeline::loadShaderBytes("PresentBlit_vs.dxil",vs)||!pipeline::loadShaderBytes("PresentBlit_ps.dxil",ps)||!pass_.create(ctx.device(),vs,ps,pipeline::kOutputPoolSlots+8,graph.outputFormat(),16))return false;
+    // The trailing `true` adds the b1 root CBV the per-pixel DV expansion table
+    // needs (custom, 完整 B); the blit declares the flag itself.
+    if(!pipeline::loadShaderBytes("PresentBlit_vs.dxil",vs)||!pipeline::loadShaderBytes("PresentBlit_ps.dxil",ps)||!pass_.create(ctx.device(),vs,ps,pipeline::kOutputPoolSlots+8,graph.outputFormat(),16,true))return false;
+    // Custom (完整 B): allocate the expansion table with the chain, so b1 is always
+    // backed by a real buffer even on the first frame and for non-DV sources.
+    if(!ensureDoviTable(ctx.device()))return false;
     if(sink_.xess()){
         std::vector<uint8_t> cs;
         if(!pipeline::loadShaderBytes("PresentMotion.dxil",cs)||!presentMotionPass_.create(ctx.device(),cs,4,1,1,16))return false;
@@ -298,6 +332,82 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         }
     }
     HdrCurveSettings effective=followDovi?engine::doviCurveFromLevel1(latestDovi_,hdrCurve,graph.doviFollowAverage(),smoothedAvgPq,smoothedPeakPq):hdrCurve;
+    // Custom (完整 B): CB1-style per-pixel highlight expansion.
+    //
+    // The follow path only moves where the roll-off starts; this adds what CB1's
+    // Adaptive HDR Mapping does on top - a 257-entry table of nits of lift that the
+    // blit applies per pixel on the BT.2020 luminance, so a 100-200 nit DV master
+    // reaches the headroom the panel actually has instead of being described as if
+    // it were the panel's ceiling.
+    //
+    // The ceiling is what the picture may legitimately reach: the user's display
+    // peak when they set one, else their highlight ceiling. Both zero means "no
+    // stated headroom", and then nothing is expanded. Do not fall back to the EDID
+    // number: almost every panel answers 10000 nits with a near-zero black
+    // (hdr-peak reports plausible=0), and expanding against that would invent a
+    // highlight no display can show.
+    bool doviExpansionActive=false;
+    double doviMasterNits=0.0,doviCeilingNits=0.0;
+    float doviLiftNits=0.0f;
+    // VEYRA_DOVI_ENHANCED stays a test override next to the UI switch, the same
+    // way VEYRA_DOVI_FOLLOW sits next to the follow switch.
+    const bool expansionWanted=graph.doviEnhanced()||std::getenv("VEYRA_DOVI_ENHANCED")!=nullptr;
+    if(followDovi&&expansionWanted&&graph.hdrOutput()&&hdrCurve.enabled){
+        doviMasterNits=engine::pqToNits(smoothedPeakPq>0.0?smoothedPeakPq:latestDovi_.maxPq);
+        doviCeilingNits=effective.displayPeakNits?double(effective.displayPeakNits)
+                                              :double(effective.peakCapNits);
+        // Diagnostic override (test material only): state a ceiling without
+        // touching the user's saved settings.
+        if(const char* forced=std::getenv("VEYRA_DOVI_CEILING")){
+            const double value=std::atof(forced);
+            if(value>10.0)doviCeilingNits=value;
+        }
+        if(doviCeilingNits>doviMasterNits+1.0){
+            pipeline::DoviExpansionInput in;
+            in.sourcePeakNits=doviMasterNits;
+            in.sceneAvgNits=engine::pqToNits(smoothedAvgPq>0.0?smoothedAvgPq:latestDovi_.avgPq);
+            in.displayPeakNits=doviCeilingNits;
+            in.valid=doviMasterNits>10.0;
+            auto plan=pipeline::buildDoviExpansion(in);
+            // CB1's bounded transition: no table may move faster than half the
+            // headroom per second, so a cut cannot flash the expansion.
+            const auto now=std::chrono::steady_clock::now();
+            const double dt=doviPlanTemporal_?std::chrono::duration<double>(now-doviPlanStamp_).count():0.0;
+            pipeline::transitionDoviExpansion(plan,doviPreviousPlan_,dt,!doviPlanTemporal_);
+            doviPlanTemporal_=true;doviPlanStamp_=now;
+            doviPlan_=plan;doviPreviousPlan_=plan;
+            if(plan.active&&ensureDoviTable(ctx.device())){
+                const unsigned tableSlot=doviTableSlot_;
+                float* dst=doviTableMapped_+size_t(tableSlot)*kDoviTableFloatsPerSlot;
+                for(int k=0;k<pipeline::kDoviExtraEntries;++k)dst[k]=plan.extra[std::size_t(k)];
+                doviTableSlot_=(doviTableSlot_+1)%kDoviTableSlots;
+                doviTableBound_=tableSlot;
+                doviExpansionActive=true;
+                doviLiftNits=plan.extra[pipeline::kDoviExtraEntries-1];
+            }
+        }else if(doviPlanTemporal_){
+            // The scene now reaches the ceiling on its own: drop the table at once
+            // instead of easing a lift that no longer has anywhere to go.
+            doviPlan_={};doviPreviousPlan_={};doviPlanStamp_={};
+        }
+    }else if(doviPlanTemporal_){
+        // Switched off (or lost the RPU): forget the plan so the next source starts
+        // from its own scene instead of the previous one's table.
+        doviPlan_={};doviPreviousPlan_={};doviPlanTemporal_=false;doviPlanStamp_={};
+    }
+    doviExpansionLive_=doviExpansionActive;
+    const bool traceDoviExpansion=std::getenv("VEYRA_DOVI_TRACE")!=nullptr;
+    if(traceDoviExpansion){
+        // Same gate and throttle as the follow trace: a switch that never reached
+        // the blit, or a ceiling that never allowed expansion, has to be visible.
+        static int doviExpandCount=0;
+        if(doviExpandCount<3||doviExpandCount%200==0)
+            veyra::log::info("dovi-expand",std::format(
+                "n={} on={} live={} masterNits={:.1f} ceilingNits={:.1f} amount={:.4f} liftNits={:.1f} tableSlot={}",
+                doviExpandCount,expansionWanted?1:0,doviExpansionActive?1:0,
+                doviMasterNits,doviCeilingNits,doviPlan_.amount,doviLiftNits,doviTableBound_));
+        ++doviExpandCount;
+    }
     // Custom: smooth the value that actually reaches the blit. Smoothing the peak is
     // not enough: the knee goes through clamp() and min(user), both of which flatten
     // or step, so the output can jump while the input is already smooth. This is what
@@ -391,7 +501,10 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     // turns that step into noise the eye averages away.
     const bool p7Frame=graph.doviP7Active();
     const float ditherFlag=(graph.hdrOutput()&&p7Frame)?512.0f:0.0f;   // 256 is the alpha round trip in 2.1.6
-    const float mainFlags=samplingFlags+curveFlag+(curveFlag&&graph.hdr10Output()?36.0f:0.0f)+ditherFlag;
+    // Custom (完整 B): the expansion only exists inside the HDR-curve branch, so it
+    // asks for the curve bit as well.
+    const float doviFlag=(doviExpansionActive&&curveFlag!=0.0f)?1024.0f:0.0f;
+    const float mainFlags=samplingFlags+curveFlag+(curveFlag&&graph.hdr10Output()?36.0f:0.0f)+ditherFlag+doviFlag;
     float dims[16]={renderW,renderH,mainFlags,inverseFit,float(rc.right),float(rc.bottom),view.centerX,view.centerY};
     // The blit sees the per-frame curve when Dolby Vision follow is on; every
     // other frame (and every non-DV source) passes the user's settings through.
@@ -409,13 +522,21 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         float peak=effective.peakCapNits?float(effective.peakCapNits):1000.0f;
         const float start=float(effective.highlightStartNits);
         if(followDovi){
-            const float framePeak=float(engine::pqToNits(latestDovi_.maxPq));
+            float framePeak=float(engine::pqToNits(latestDovi_.maxPq));
+            // Custom (完整 B): the expansion lifts the frame's own highlight, so the
+            // roll-off has to end at the lifted peak. Leaving it at the unexpanded
+            // peak would let the follow path's narrow ceiling compress the lift back
+            // out in the very next step - the table would be applied and invisible.
+            if(doviExpansionActive)framePeak+=doviLiftNits;
             peak=std::min(peak,std::max(framePeak,start+1.0f));
         }
         dims[12]=std::max(1.0f,peak-start)*float(effective.rollOffPercent)/100.0f;
         dims[13]=float(effective.peakCapNits);
     }
-    dims[14]=0.0f;dims[15]=0.0f;
+    // Custom (完整 B): the table's indexing peak and the ceiling its soft knee may
+    // reach. Both zero while the expansion is off, which disables it in the shader.
+    dims[14]=doviExpansionActive?float(doviMasterNits):0.0f;
+    dims[15]=doviExpansionActive?float(doviCeilingNits):0.0f;
     if(traceDovi){
         // Gated trace: proves the per-frame curve reached the blit constants.
         // Throttled like the source-side dovi-probe so a long file stays small.
@@ -437,6 +558,9 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     }
     list->SetGraphicsRoot32BitConstants(0,16,dims,0);
     list->SetGraphicsRootDescriptorTable(1,{pass_.heap->GetGPUDescriptorHandleForHeapStart().ptr+size_t(slot+(generated?2:0))*pass_.increment});
+    // Custom (完整 B): the expansion table. Bound every frame (a root signature
+    // parameter left unset is undefined), with the flag deciding whether it is read.
+    if(doviTable_)list->SetGraphicsRootConstantBufferView(2,doviTable_->GetGPUVirtualAddress()+UINT64(doviTableBound_)*kDoviTableSlotBytes);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);list->DrawInstanced(3,1,0,0);
     bool probeIssued=false;
     const bool observe=probeObserved_&&curveFlag!=0.0f;
@@ -696,6 +820,10 @@ void VideoPresenter::close(){
     if(presentationRing_.initialized())presentationRing_.drainQueue();
     hasPresented_=false;gpuTimer_.close();compositeTarget_.Reset();exclusionUiTarget_.Reset();exclusionHudlessTarget_.Reset();exclusionUiEnabled_=false;copyBeforePresent_=copyEligible_=false;rtvs_.Reset();
     probeStats_.Reset();probeReadback_.Reset();probeCpuViews_.Reset();probePass_={};probePending_=false;probeFailed_=false;probeNext_={};probeCurve_={};probeIdentity_={};liveCoverage_={};pass_={};sink_.shutdown();
+    // Custom (完整 B): unmap before releasing, or the buffer keeps the old mapping.
+    if(doviTable_&&doviTableMapped_)doviTable_->Unmap(0,nullptr);
+    doviTableMapped_=nullptr;doviTable_.Reset();doviTableSlot_=doviTableBound_=0;
+    doviPlan_={};doviPreviousPlan_={};doviPlanTemporal_=false;doviExpansionLive_=false;
     presentMotionPass_={};presentMotion_={};previousXessWidth_=previousXessHeight_=0;
     presentationRing_.shutdown();presentationFence_.Reset();presentationQueue_.Reset();
     if(presentationEvent_){CloseHandle(presentationEvent_);presentationEvent_=nullptr;}

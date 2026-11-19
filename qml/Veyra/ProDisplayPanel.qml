@@ -732,6 +732,20 @@ ColumnLayout {
                         visible: veyra.doviFollow
                         enabled: veyra.hdrCurve
                         opacity: enabled ? 1 : 0.5
+                        label: qsTr("高光扩展")
+                        hint: qsTr("按每帧自身的亮度，把片源的高光往「峰值上限」方向抬；母版本身已经比上限亮时不会改变画面。峰值上限为 0（不限制）时无处可抬，需要先给它一个值")
+                        value: veyra.doviEnhanced ? qsTr("已开启") : qsTr("已关闭")
+                        VSwitch {
+                            objectName: "list-hdr-dovi-enhanced"
+                            checked: veyra.doviEnhanced
+                            onToggled: checked => veyra.doviEnhanced = checked
+                        }
+                    }
+                    VRow {
+                        hintBelow: true
+                        visible: veyra.doviFollow
+                        enabled: veyra.hdrCurve
+                        opacity: enabled ? 1 : 0.5
                         label: qsTr("参考平均亮度")
                         hint: qsTr("勾选后，高光起点同时参考每帧的平均亮度：暗场多的片子压得更积极，亮场多的保留更多高光；取消则只看峰值")
                         VSwitch {

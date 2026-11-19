@@ -408,6 +408,18 @@ struct EnhancementSettings {
     // Custom: also let the frame's average brightness move the knee, the way
     // libplacebo's st2094_pick_knee does. Off keeps the previous peak-only curve.
     bool doviFollowAverage=false;
+    // Custom (完整 B): CB1-style per-pixel highlight expansion.
+    //
+    // CB1's Adaptive HDR Mapping builds a 257-entry table of *nits of lift* from
+    // the scene's own L1 high/mid levels and the display's ceiling, then applies it
+    // per pixel on the BT.2020 luminance (with a soft knee so the top never
+    // overflows). Veyra's follow path only moves the roll-off start; this adds the
+    // missing expansion, which is what makes a 100-200 nit DV master use the
+    // headroom a brighter panel actually has.
+    //
+    // Needs `doviFollow` (no L1 = no table) and HDR output. Off by default: it
+    // raises the highlight end of the picture, so it stays a deliberate choice.
+    bool doviEnhanced=false;
     // Custom (P5): decode and composite the Dolby Vision profile 7 enhancement
     // layer instead of playing the base layer alone.
     //

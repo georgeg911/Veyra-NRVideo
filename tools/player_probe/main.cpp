@@ -447,6 +447,10 @@ int main(int argc, char** argv)
         const bool skipViews = GetEnvironmentVariableW(L"VEYRA_SKIP_VIEWS", nullptr, 0) != 0;
         const bool viewsTex  = GetEnvironmentVariableW(L"VEYRA_VIEWS_TEX", nullptr, 0) != 0;
         GraphicsPass presentPass;
+        // Custom (完整 B): PresentBlit declares a b1 root CBV for the Dolby Vision
+        // expansion table. The probe never expands anything, so a zeroed 1 KB upload
+        // buffer keeps the third root parameter defined at every draw.
+        ComPtr<ID3D12Resource> doviTableZero;
         ComPtr<ID3D12DescriptorHeap> rtvHeap;
         UINT rtvIncrement = 0;
         {
@@ -454,10 +458,28 @@ int main(int argc, char** argv)
                 std::vector<uint8_t> vs, ps;
                 if (!loadShaderBytes("PresentBlit_vs.dxil", vs) ||
                     !loadShaderBytes("PresentBlit_ps.dxil", ps) ||
-                    !presentPass.create(context.device(), vs, ps, 8)) {
+                    !presentPass.create(context.device(), vs, ps, 8, DXGI_FORMAT_R8G8B8A8_UNORM, 16, true)) {
                     veyra::log::error("player", "present graphics pass creation failed");
                     break;
                 }
+                D3D12_HEAP_PROPERTIES dvHeap{};
+                dvHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+                D3D12_RESOURCE_DESC dvDesc{};
+                dvDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                dvDesc.Width = 1280;
+                dvDesc.Height = 1;
+                dvDesc.DepthOrArraySize = 1;
+                dvDesc.MipLevels = 1;
+                dvDesc.SampleDesc.Count = 1;
+                dvDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                if (FAILED(context.device()->CreateCommittedResource(&dvHeap, D3D12_HEAP_FLAG_NONE, &dvDesc,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&doviTableZero)))) {
+                    veyra::log::error("player", "zero DV expansion table creation failed");
+                    break;
+                }
+                void* dvMapped = nullptr;
+                if (SUCCEEDED(doviTableZero->Map(0, nullptr, &dvMapped)) && dvMapped)
+                    std::memset(dvMapped, 0, 1280);
             }
             D3D12_DESCRIPTOR_HEAP_DESC rh{};
             rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -735,6 +757,8 @@ int main(int argc, char** argv)
                     list->SetGraphicsRoot32BitConstants(0, 16, constants, 0);
                     list->SetGraphicsRootDescriptorTable(1,
                         { presentPass.heap->GetGPUDescriptorHandleForHeapStart().ptr + srvSlot * presentPass.increment });
+                    if (doviTableZero)
+                        list->SetGraphicsRootConstantBufferView(2, doviTableZero->GetGPUVirtualAddress());
                     D3D12_VIEWPORT vp{ 0.0f, 0.0f,
                         static_cast<float>(sink.bufferWidth()), static_cast<float>(sink.bufferHeight()), 0.0f, 1.0f };
                     D3D12_RECT sc{ 0, 0, static_cast<LONG>(sink.bufferWidth()), static_cast<LONG>(sink.bufferHeight()) };

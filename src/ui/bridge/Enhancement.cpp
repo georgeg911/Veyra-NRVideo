@@ -452,6 +452,7 @@ bool QmlPlayerBridge::loadHdrTitleProfile(const QString& title){
     // Custom: the Dolby Vision follow belongs to the same per-film look, so it is
     // remembered with it. Entries written before it existed keep the current value.
     s.doviFollow=stored.value(QStringLiteral("doviFollow"),s.doviFollow).toBool();
+    s.doviEnhanced=stored.value(QStringLiteral("doviEnhanced"),s.doviEnhanced).toBool();
     s.doviP7Compose=stored.value(QStringLiteral("doviP7Compose"),s.doviP7Compose).toBool();
     QScopedValueRollback<bool> restoring(impl_->hdrRestoring,true);
     return commitHdrTuning(std::move(s));
@@ -474,6 +475,7 @@ bool QmlPlayerBridge::storeHdrTitleProfile(const QString& title){
   entry[QStringLiteral("peakCapNits")]=int(c.peakCapNits);
   entry[QStringLiteral("strengthPercent")]=int(c.strengthPercent);
   entry[QStringLiteral("doviFollow")]=doviFollow();
+  entry[QStringLiteral("doviEnhanced")]=doviEnhanced();
   entry[QStringLiteral("doviP7Compose")]=doviP7Compose();
   auto list=i.prefs.value(QStringLiteral("hdrTitles")).toList();
   const auto normalized=[](QString v){v.replace(QLatin1Char('\\'),QLatin1Char('/'));return v;};

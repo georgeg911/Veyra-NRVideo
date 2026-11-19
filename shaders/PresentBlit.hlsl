@@ -19,7 +19,62 @@ cbuffer PresentBlitConstants : register(b0)
     // a no-op at its default (lift 0, mid 203, start 0, cap 0).
     float4 curve0;  // x=shadow lift EV, y=shadow range nits, z=mid-gray nits, w=highlight start nits
     float4 curve1;  // x=roll-off scale nits, y=peak cap nits (0 = off)
+                    // Custom (完整 B): z=DV master peak nits, w=DV expansion ceiling nits
+                    // (both 0 while the per-pixel expansion is off).
 };
+
+// Custom (完整 B): Dolby Vision per-pixel highlight expansion.
+//
+// 257 entries of "nits of lift", packed four to a float4 (entry k -> k>>2, lane
+// k&3) and sent as a constant-buffer root descriptor, not a texture: the host
+// rebuilds the whole table every frame, and a dynamic index into a cbuffer is a
+// constant load rather than a sampled fetch. The table is derived on the CPU
+// (veyra/pipeline/DoviEnhancedCurve.h) from the same L1 levels the follow curve
+// uses, so nothing here has to know about Dolby Vision itself.
+cbuffer DoviExpansionTable : register(b1)
+{
+    float4 doviExtra[65];   // 260 floats; entries 0..256 are used
+};
+
+float DoviExtraAt(int k)
+{
+    const float4 v = doviExtra[k >> 2];
+    const int lane = k & 3;
+    return lane == 0 ? v.x : (lane == 1 ? v.y : (lane == 2 ? v.z : v.w));
+}
+
+// This is CB1's cb1_dv_enhanced_pixel reduced to the parts Veyra has data for
+// (no CM4 creative anchors, so no hue-dependent retention): look the lift up by
+// the BT.2020 luminance, turn it into a ratio of that luminance, then cap the
+// ratio with a soft knee so expansion never overshoots the display ceiling in a
+// single step. `dvp.x` is the master peak the table is indexed against, `dvp.y`
+// the ceiling the picture may reach.
+float3 DoviExpand(float3 nits, float4 dvp)
+{
+    const float y = dot(nits, float3(.2627, .6780, .0593));
+    if (y <= 10.0 || dvp.x <= 10.0) return nits;
+    // Above the master peak the metadata and the picture disagree (a bad RPU, or
+    // HDR10+ SEI describing a different grade). CB1 refuses those pixels and so
+    // does this: clamping the index would hand the brightest content the largest
+    // lift, which is the opposite of what a headroom expansion should do. The
+    // 0.1% tolerance absorbs the BT.2020 weight rounding at exactly the master.
+    if (y > dvp.x * 1.001) return nits;
+    const float u = saturate((y - 10.0) / max(dvp.x - 10.0, 1e-3)) * 256.0;
+    const int index = min(int(u), 255);
+    const float extra = lerp(DoviExtraAt(index), DoviExtraAt(index + 1), u - float(index));
+    if (!(extra > 0.0)) return nits;
+    // The knee is measured on the brightest channel, so a saturated highlight is
+    // protected exactly like a neutral one.
+    const float peak = max(max(nits.r, nits.g), nits.b);
+    const float headroom = max(0.0, dvp.y / max(peak, 1e-3) - 1.0);
+    const float knee = 0.9 * headroom, width = 0.1 * headroom;
+    float delta = extra / y;   // the lift as a multiple of this pixel's luminance
+    if (delta > knee) {
+        const float tail = delta - knee;
+        delta = knee + (width + tail > 0.0 ? width * tail / (width + tail) : 0.0);
+    }
+    return nits * (1.0 + delta);
+}
 
 // Lift the shadows without touching the highlights, move the mid-gray reference
 // with the peak held fixed, then roll off and cap the top end.
@@ -142,8 +197,14 @@ float4 psMain(VSOut input) : SV_Target
     if(flags&32)color.rgb=HdrDecodePq(color.rgb);
     if(flags&8)color.rgb*=203.0/80.0; // SDR comparison white in an HDR output.
     // Custom: static HDR curve, on absolute nits (the working space is linear
-    // scRGB, 1.0 = 80 nits), before the transfer function is encoded.
-    if(flags&16)color.rgb=HdrCurve(color.rgb*80.0,curve0,curve1)/80.0;
+    // scRGB, 1.0 = 80 nits), before the transfer function is encoded. The
+    // per-pixel Dolby Vision expansion runs first, in the source's own nits, so
+    // the curve then rolls off the expanded highlight instead of the original one.
+    if(flags&16){
+        float3 nits=color.rgb*80.0;
+        if(flags&1024)nits=DoviExpand(nits,float4(curve1.z,curve1.w,0,0));
+        color.rgb=HdrCurve(nits,curve0,curve1)/80.0;
+    }
     if(flags&1){float3 c=max(color.rgb,0);color.rgb=lerp(1.055*pow(c,1.0/2.4)-0.055,c*12.92,step(c,0.0031308));}
     if(flags&4)color.rgb=HdrEncodePq(color.rgb);
     if(flags&256)color.rgb*=color.a;

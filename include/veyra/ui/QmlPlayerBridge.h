@@ -56,6 +56,7 @@ class QmlPlayerBridge : public QObject {
     Q_PROPERTY(bool doviFollow READ doviFollow WRITE setDoviFollow NOTIFY settingsChanged)
     Q_PROPERTY(bool doviP7Compose READ doviP7Compose WRITE setDoviP7Compose NOTIFY settingsChanged)
     Q_PROPERTY(bool doviFollowAverage READ doviFollowAverage WRITE setDoviFollowAverage NOTIFY settingsChanged)
+    Q_PROPERTY(bool doviEnhanced READ doviEnhanced WRITE setDoviEnhanced NOTIFY settingsChanged)
     Q_PROPERTY(QString outputSummary READ outputSummary NOTIFY snapshotChanged)
     Q_PROPERTY(QString srStageSummary READ srStageSummary NOTIFY snapshotChanged)
     Q_PROPERTY(QString srStageNote READ srStageNote NOTIFY snapshotChanged)
@@ -1494,6 +1495,8 @@ public:
     void setDoviP7Compose(bool on);
     bool doviFollowAverage() const;
     void setDoviFollowAverage(bool on);
+    bool doviEnhanced() const;
+    void setDoviEnhanced(bool on);
 
 signals:
     void mediaOpenRequested(); // Synchronous intent, before opening or waiting for success.

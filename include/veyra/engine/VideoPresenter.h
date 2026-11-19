@@ -4,6 +4,7 @@
 #include <dxgi1_6.h> // DXGI_HDR_METADATA_HDR10 (custom: HDR static metadata)
 #include "veyra/pipeline/GpuPassUtils.h"
 #include "veyra/pipeline/FramePacket.h" // custom: pipeline::DoviFrameInfo
+#include "veyra/pipeline/DoviEnhancedCurve.h" // custom: 完整 B expansion table
 #include "veyra/engine/PreviewView.h"
 #include "veyra/engine/HdrOutputTuning.h"
 #include "veyra/gfx/CommandSlotRing.h"
@@ -169,6 +170,27 @@ private:
     // Custom: Dolby Vision level 1 for the frame being presented. Purely
     // additive: the blit uses it only when the follow switch is on.
     pipeline::DoviFrameInfo latestDovi_{};
+    // Custom (完整 B): CB1-style per-pixel highlight expansion. The plan is built
+    // per frame from the same smoothed L1 the knee uses, eased by CB1's bounded
+    // transition, and uploaded as 257 floats just before the blit. Kept even while
+    // the switch is off, so turning it on does not start from a stale table.
+    pipeline::DoviExpansionPlan doviPlan_{}, doviPreviousPlan_{};
+    bool doviPlanTemporal_ = false;
+    std::chrono::steady_clock::time_point doviPlanStamp_{};
+    // One small upload buffer per frame queued; the presentation ring holds three
+    // lists, so a fourth slot is never still being read when it is rewritten.
+    static constexpr unsigned kDoviTableSlots = 4;
+    // 257 floats rounded up to the 256-byte CBV alignment every slot needs.
+    static constexpr unsigned kDoviTableSlotBytes = 1280;
+    static constexpr unsigned kDoviTableFloatsPerSlot = kDoviTableSlotBytes / sizeof(float);
+    Microsoft::WRL::ComPtr<ID3D12Resource> doviTable_;
+    float* doviTableMapped_ = nullptr;
+    unsigned doviTableSlot_ = 0, doviTableBound_ = 0;
+    // Custom (完整 B): true when the last present actually put the table on the
+    // GPU. Reported in the trace so "expansion requested but never applied" stays
+    // diagnosable.
+    bool doviExpansionLive_ = false;
+    bool ensureDoviTable(ID3D12Device*);
     // Exponential smoothing for the follow inputs. A sliding window was used here
     // first and was wrong: halving a running sum and its integer count keeps the
     // ratio only when the count is even, so on odd counts the average gained a

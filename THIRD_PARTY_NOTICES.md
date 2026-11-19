@@ -1181,3 +1181,20 @@ Linux OBS filter work is adopted from andreanjoes PR #96 at
 validates malformed cube LUTs, clears failed LUT selections, samples LUT texel
 centres and preserves premultiplied transparency. OBS's public colour-filter
 shader was consulted for the alpha contract; no OBS DLL is bundled here.
+
+## CB1 Adaptive HDR Mapping (2026-11-19)
+
+`include/veyra/pipeline/DoviEnhancedCurve.h` reproduces the published arithmetic
+of CB1's Adaptive HDR Mapping: the per-scene `amount` terms, the 257-entry lift
+table and the bounded temporal transition, as documented in
+`CB1/docs/ALGORITHMS.md` and implemented in `cb1_dv_enhanced.c`.
+
+Source: https://github.com/CroqueMr/libreelec-CB1 . License: `GPL-2.0-or-later`,
+compatible with Veyra's GPL-3.0 (a GPL-2.0-or-later work may be upgraded to
+GPL-3.0). No CB1 source file is copied - only the published arithmetic is
+reproduced in Veyra's own code, so no CB1 file header or copyright line is
+carried over. Veyra has no CM v4.0 L2/L8 anchors, so CB1's CM4 "retention" and
+hue-severity terms are not implemented; the expansion is scene-driven only and
+never touches hue. The GPU side (`shaders/PresentBlit.hlsl`, `DoviExpand`) and the
+CPU reference (`doviExpandRgb`) are pinned in step by
+`tests/unit/DoviEnhancedCurveTests.cpp`.
