@@ -1681,6 +1681,12 @@ add_executable(veyra_dovi_enhanced_curve_tests tests/unit/DoviEnhancedCurveTests
 target_compile_features(veyra_dovi_enhanced_curve_tests PRIVATE cxx_std_20)
 target_include_directories(veyra_dovi_enhanced_curve_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(veyra_dovi_enhanced_curve_tests PRIVATE /utf-8)
+# Custom (完整 C): the header-only Dolby Vision trim operator plus the 257-entry
+# retention table it feeds; same contract-test style as the expansion tests.
+add_executable(veyra_dovi_cm4_trim_tests tests/unit/DoviCm4TrimTests.cpp)
+target_compile_features(veyra_dovi_cm4_trim_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_dovi_cm4_trim_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(veyra_dovi_cm4_trim_tests PRIVATE /utf-8)
   target_compile_features(veyra_preset_library_tests PRIVATE cxx_std_20)
   target_include_directories(veyra_preset_library_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_preset_library_tests PRIVATE veyra_base)

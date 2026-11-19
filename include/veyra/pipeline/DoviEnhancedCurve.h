@@ -19,6 +19,7 @@
 #include <cstdint>
 
 #include "veyra/pipeline/DoviCm4.h"
+#include "veyra/pipeline/DoviCm4Trim.h"
 
 namespace veyra::pipeline {
 
@@ -94,12 +95,30 @@ inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in,
     // Shape: a smooth ramp that reaches full lift at the scene's highlight and
     // keeps a small cushion below it so the roll-off does not step.
     const double exponent = 2.0 + 2.0 * detail::smoothstepRange(0.04, 0.30, midtoneShare);
+
+    // Custom (完整 C): CB1's retention knots weight the shape, so the authored trim
+    // response survives instead of being flattened by a scene-only ramp. Without
+    // usable anchors every knot is 1.0 and the shape is exactly what it was before.
+    std::array<float, kDoviExtraEntries> retention{};
+    bool haveRetention = false;
+    DoviCm4Selection selection;
+    if (cm4 != nullptr && cm4->valid()) {
+        const uint16_t displayPq = uint16_t(std::lround(cm4NitsToPq(in.displayPeakNits) * 4095.0));
+        selection = selectDoviCm4Anchors(*cm4, displayPq);
+        if (selection.valid())
+            haveRetention = buildDoviRetention(*cm4, selection, in.sourcePeakNits, retention);
+    }
+
     double accumulated = 0.0;
     double shape[kDoviExtraEntries]{};
     for (int k = 1; k < kDoviExtraEntries; ++k) {
         const double u = k / double(kDoviExtraEntries - 1);
         const double u0 = (k - 1) / double(kDoviExtraEntries - 1);
-        accumulated += (std::pow(u, exponent) - std::pow(u0, exponent));
+        // The contract's C[k] uses the average of the two neighbouring knots.
+        const double weight = haveRetention
+            ? 0.5 * (double(retention[std::size_t(k - 1)]) + double(retention[std::size_t(k)]))
+            : 1.0;
+        accumulated += (std::pow(u, exponent) - std::pow(u0, exponent)) * weight;
         shape[k] = accumulated;
     }
     const double normalization = std::max(shape[kDoviExtraEntries - 1], 1e-9);
@@ -114,10 +133,8 @@ inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in,
     // Custom (完整 C): colour restraint. The anchors are resolved against the
     // display peak the expansion was sized for, exactly as CB1 resolves them
     // against the configured target.
-    if (cm4 != nullptr && cm4->valid() && active) {
-        const uint16_t displayPq = uint16_t(std::lround(cm4NitsToPq(plan.displayPeakNits) * 4095.0));
-        const auto selection = selectDoviCm4Anchors(*cm4, displayPq);
-        if (selection.valid()) {
+    if (active && selection.valid()) {
+        {
             DoviCm4ColorTable table;
             buildDoviCm4ColorTable(*cm4, selection, table);
             if (table.valid) {
