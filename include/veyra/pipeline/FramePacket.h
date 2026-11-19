@@ -9,6 +9,7 @@
 #include <d3d12.h>
 
 #include "veyra/pipeline/DoviP7Constants.h"
+#include "veyra/pipeline/DoviCm4.h"   // custom: CM v2.9/v4.0 creative anchors
 #include <dxgiformat.h>
 
 struct AVFrame;   // Custom (P5): FFmpeg frame, borrowed for the EL; not owned here
@@ -260,6 +261,10 @@ struct DoviFrameInfo {
     bool valid=false;
     uint8_t profile=0;
     float minPq=0.0f, maxPq=0.0f, avgPq=0.0f;
+    // Custom (完整 C): CM v2.9 / v4.0 creative anchors for this frame. Empty when
+    // the source carries L1 only, which keeps every downstream path byte-identical
+    // to the L1-only behaviour. See pipeline/DoviCm4.h.
+    DoviCm4Info cm4{};
 };
 
 // Sentinel for DoviFrameInfo::profile when the values came from an HDR10+

@@ -18,6 +18,7 @@ struct AVDOVIMetadata;
 
 #include "veyra/media/DemuxSession.h"
 #include "veyra/media/FFmpegDemuxer.h"
+#include "veyra/pipeline/DoviCm4.h"   // custom (完整 C): creative anchors from libdovi
 #include "veyra/media/FFmpegVideoDecoder.h"
 
 #include <deque>
@@ -85,6 +86,8 @@ private:
     // FFmpeg never exposes AV_FRAME_DATA_DOVI_METADATA for it.
     AVDOVIMetadata* elDoviMeta_ = nullptr;
     bool elDoviMetaValid_ = false;
+    // Custom (完整 C): creative anchors parsed alongside the EL RPU.
+
     // Index of the enhancement layer when it travels as its own video stream
     // (Dolby test material); -1 when the layer rides inside the base packets.
     int elStreamIndex_ = -1;
@@ -175,6 +178,17 @@ private:
     bool preferHardwareDecode_ = false;
     bool requireHardwareDecode_ = false; // "强制硬解": never fall back to software
     const std::atomic<bool>* cancelled_ = nullptr;
+    // Custom (完整 C): creative anchors parsed alongside the EL RPU.
+    pipeline::DoviCm4Info elDoviCm4_{};
+    // One-shot report of the anchors actually parsed (custom, 完整 C).
+    bool cm4Reported_ = false;
+    // Custom (完整 C): the base packet keeps its RPU NAL (FFmpeg copies it into
+    // frame side data but leaves the bytes in the bitstream), and libdovi is the
+    // only path that exposes L8/L9. Parsed here once per packet.
+    AVDOVIMetadata* cm4Meta_ = nullptr;
+    pipeline::DoviCm4Info baseCm4_{};
+    bool baseCm4Valid_ = false;
+    void parseCm4FromBasePacket(const AVPacket* packet);
 };
 
 } // namespace veyra::source

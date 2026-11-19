@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "veyra/pipeline/DoviCm4.h"
+
 extern "C" {
 #include <libavutil/dovi_meta.h>
 #include <libavutil/mem.h>
@@ -31,7 +33,11 @@ inline AVDOVIMetadata* allocDoviMetadata() { return av_dovi_metadata_alloc(nullp
 // Copies libdovi's parsed fields into `out` (allocated with
 // av_dovi_metadata_alloc by the caller). Returns false when the payload is not a
 // type-2 HEVC RPU or the mapping is absent.
-inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadata* out) {
+//
+// `cm4` (custom, 完整 C) optionally receives the creative anchors - L8 first, L2
+// as compatibility fallback. Pass nullptr to keep the previous behaviour.
+inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadata* out,
+                                 pipeline::DoviCm4Info* cm4 = nullptr) {
     if (data == nullptr || out == nullptr || size < 5) return false;
     DoviRpuOpaque* rpu = dovi_parse_unspec62_nalu(data, size);
     if (rpu == nullptr) return false;
@@ -171,6 +177,68 @@ inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadat
     // Colour metadata (P5 needs it; P7's reconstruction ignores it).
     const DoviVdrDmData* dm = dovi_rpu_get_vdr_dm_data(rpu);
     if (dm != nullptr) {
+        // Custom (完整 C): creative anchors. L8 wins over L2 (CB1: "Eligible L8
+        // anchors take precedence over L2"), and an L8 whose target peak cannot be
+        // resolved through L10 or the known-target table is dropped rather than
+        // guessed. This is the only path that can see L8 at all: FFmpeg's
+        // AVDOVIMetadata stops at L2.
+        if (cm4 != nullptr) {
+            cm4->clear();
+            int anchors = 0;
+            for (size_t i = 0; i < dm->dm_data.level8.len && anchors < pipeline::kDoviCm4MaxAnchors; ++i) {
+                const DoviExtMetadataBlockLevel8* l8 = dm->dm_data.level8.list[i];
+                if (l8 == nullptr) continue;
+                uint16_t peak = 0;
+                for (size_t k = 0; k < dm->dm_data.level10.len; ++k) {
+                    const DoviExtMetadataBlockLevel10* l10 = dm->dm_data.level10.list[k];
+                    if (l10 != nullptr && l10->target_display_index == l8->target_display_index) {
+                        peak = l10->target_max_pq;
+                        break;
+                    }
+                }
+                if (!peak) peak = pipeline::cm4KnownTargetPq(l8->target_display_index);
+                if (!peak) continue;
+                auto& anchor = cm4->anchors[std::size_t(anchors++)];
+                anchor.targetMaxPq = peak;
+                anchor.trimSlope = l8->trim_slope;
+                anchor.trimOffset = l8->trim_offset;
+                anchor.trimPower = l8->trim_power;
+                anchor.trimChromaWeight = l8->trim_chroma_weight;
+                anchor.trimSaturationGain = l8->trim_saturation_gain;
+                anchor.msWeight = l8->ms_weight;
+                anchor.targetMidContrast = l8->target_mid_contrast;
+                anchor.clipTrim = l8->clip_trim;
+                anchor.saturationVector = {l8->saturation_vector_field0, l8->saturation_vector_field1,
+                                           l8->saturation_vector_field2, l8->saturation_vector_field3,
+                                           l8->saturation_vector_field4, l8->saturation_vector_field5};
+                anchor.hueVector = {l8->hue_vector_field0, l8->hue_vector_field1,
+                                    l8->hue_vector_field2, l8->hue_vector_field3,
+                                    l8->hue_vector_field4, l8->hue_vector_field5};
+                anchor.fromLevel8 = true;
+            }
+            // L2 compatibility only when no L8 anchor resolved.
+            if (anchors == 0) {
+                for (size_t i = 0; i < dm->dm_data.level2.len && anchors < pipeline::kDoviCm4MaxAnchors; ++i) {
+                    const DoviExtMetadataBlockLevel2* l2 = dm->dm_data.level2.list[i];
+                    if (l2 == nullptr || !l2->target_max_pq) continue;
+                    auto& anchor = cm4->anchors[std::size_t(anchors++)];
+                    anchor.targetMaxPq = l2->target_max_pq;
+                    anchor.trimSlope = l2->trim_slope;
+                    anchor.trimOffset = l2->trim_offset;
+                    anchor.trimPower = l2->trim_power;
+                    anchor.trimChromaWeight = l2->trim_chroma_weight;
+                    anchor.trimSaturationGain = l2->trim_saturation_gain;
+                    anchor.msWeight = uint16_t(std::max<int>(0, l2->ms_weight));
+                    anchor.fromLevel8 = false;
+                }
+            }
+            cm4->count = uint8_t(anchors);
+            if (dm->dm_data.level9 != nullptr) cm4->sourcePrimaryIndex = dm->dm_data.level9->source_primary_index;
+            if (dm->dm_data.level11 != nullptr) {
+                cm4->contentType = dm->dm_data.level11->content_type;
+                cm4->hasContentType = true;
+            }
+        }
         auto* color = av_dovi_get_color(out);
         if (color != nullptr) {
             // libdovi exposes the matrix coefficients as flat int16 fields.

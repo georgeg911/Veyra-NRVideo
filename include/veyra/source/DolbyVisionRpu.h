@@ -240,4 +240,34 @@ inline pipeline::DoviFrameInfo extractDoviFrameInfo(const AVDOVIMetadata& meta,
     return out;
 }
 
+// Custom (完整 C): CM v2.9 creative trims from an FFmpeg-decoded frame.
+//
+// FFmpeg exposes L2 (the compatibility trims CM v2.9 authors) but not L8, so a
+// stream parsed this way yields L2-only anchors - CB1's "L2 compatibility only"
+// path. The L8 vectors that the hue table needs are only reachable through
+// libdovi, which is why SourceMediaFile asks that bridge separately when an
+// enhancement layer carries the RPU.
+inline void fillDoviCm4FromFfmpeg(const AVDOVIMetadata& meta,
+                                  pipeline::DoviCm4Info& out) {
+    out.clear();
+    int count = 0;
+    for(int i = 0; i < meta.num_ext_blocks && count < pipeline::kDoviCm4MaxAnchors; ++i) {
+        const auto* ext = av_dovi_get_ext(&meta, i);
+        if(!ext || ext->level != 2) continue;
+        const auto& l2 = ext->l2;
+        if(!l2.target_max_pq) continue;
+        auto& anchor = out.anchors[std::size_t(count++)];
+        anchor.targetMaxPq      = l2.target_max_pq;
+        anchor.trimSlope        = l2.trim_slope;
+        anchor.trimOffset       = l2.trim_offset;
+        anchor.trimPower        = l2.trim_power;
+        anchor.trimChromaWeight = l2.trim_chroma_weight;
+        anchor.trimSaturationGain = l2.trim_saturation_gain;
+        // FFmpeg's ms_weight is signed; the pipeline carries the raw magnitude.
+        anchor.msWeight = uint16_t(std::max<int16_t>(0, l2.ms_weight));
+        anchor.fromLevel8 = false;
+    }
+    out.count = uint8_t(count);
+}
+
 } // namespace veyra::source

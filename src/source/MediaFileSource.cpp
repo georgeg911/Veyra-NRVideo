@@ -328,7 +328,7 @@ AVPacket* MediaFileSource::buildEnhancementPacket(const AVPacket* packet) {
                 elDoviMeta_ = source::allocDoviMetadata();
             }
             const bool ok = elDoviMeta_ != nullptr &&
-                source::decodeRpuWithLibDovi(nal.data(), nal.size(), elDoviMeta_);
+                source::decodeRpuWithLibDovi(nal.data(), nal.size(), elDoviMeta_, &elDoviCm4_);
             if (ok) elDoviMetaValid_ = true;
             if (rpuReported < 3) {
                 ++rpuReported;
@@ -407,9 +407,96 @@ void MediaFileSource::dropStaleEl(int64_t oldestBasePts) {
 // Custom (P5): decode the Dolby Vision enhancement layer that rides inside the
 // same access units as the base layer. Any failure disables the path instead of
 // disturbing playback.
+// Custom (完整 C): pull the creative anchors out of the base packet.
+//
+// FFmpeg parses the RPU into frame side data, but its AVDOVIMetadata has no
+// level-8/9 members, so CM v4.0 trims never reach us that way. The RPU NAL is
+// still in the packet (length-prefixed, as Matroska delivers it), and libdovi
+// reads it completely. Only the first RPU is parsed: a packet carries one.
+void MediaFileSource::parseCm4FromBasePacket(const AVPacket* packet) {
+    baseCm4Valid_ = false;
+    if (packet == nullptr || packet->data == nullptr || packet->size <= 0) return;
+    const uint8_t* p = packet->data;
+    const size_t n = size_t(packet->size);
+    size_t off = 0;
+    while (off + 5 <= n) {
+        const uint32_t len = (uint32_t(p[off]) << 24) | (uint32_t(p[off + 1]) << 16) |
+                             (uint32_t(p[off + 2]) << 8) | uint32_t(p[off + 3]);
+        if (len < 3 || off + 4 + len > n) return;
+        if (((p[off + 4] >> 1) & 0x3F) == 62) {
+            if (cm4Meta_ == nullptr) cm4Meta_ = source::allocDoviMetadata();
+            if (cm4Meta_ != nullptr) {
+                const size_t payloadOff = off + 6;          // skip the 2-byte NAL header
+                const size_t payloadBytes = size_t(len) - 2;
+                if (payloadOff + payloadBytes <= n) {
+                    uint8_t* copy = static_cast<uint8_t*>(av_mallocz(payloadBytes + AV_INPUT_BUFFER_PADDING_SIZE));
+                    if (copy != nullptr) {
+                        ::memcpy(copy, p + payloadOff, payloadBytes);
+                        pipeline::DoviCm4Info parsed;
+                        if (source::decodeRpuWithLibDovi(copy, payloadBytes, cm4Meta_, &parsed)) {
+                            baseCm4_ = parsed;
+                            baseCm4Valid_ = true;
+                        }
+                        av_free(copy);
+                    }
+                }
+            }
+            return;
+        }
+        off += 4 + len;
+    }
+}
+
 bool MediaFileSource::feedEnhancementLayer(const AVPacket* packet) {
     const auto elStart = std::chrono::steady_clock::now();
+    // Custom (完整 C) probe: does the base packet still carry the RPU NAL? FFmpeg
+    // turns it into frame side data, but the parser usually leaves the bytes in the
+    // bitstream; if they are here, libdovi can read L8 out of them.
+    if (packet != nullptr && packet->data != nullptr && std::getenv("VEYRA_CM4_PROBE") != nullptr) {
+        static int probes = 0;
+        if (probes < 6) {
+            ++probes;
+            int nals = 0, rpu62 = 0, sei39 = 0, lengthPrefixed = 0;
+            const uint8_t* p = packet->data;
+            const size_t n = size_t(packet->size);
+            // Matroska hands packets over length-prefixed; some containers use
+            // Annex B start codes. Try the length form first and fall back.
+            {
+                size_t off = 0;
+                while (off + 5 <= n) {
+                    const uint32_t len = (uint32_t(p[off]) << 24) | (uint32_t(p[off + 1]) << 16) |
+                                         (uint32_t(p[off + 2]) << 8) | uint32_t(p[off + 3]);
+                    if (len == 0 || off + 4 + len > n) break;
+                    ++nals; ++lengthPrefixed;
+                    const int type = (p[off + 4] >> 1) & 0x3F;
+                    if (type == 62) ++rpu62;
+                    if (type == 39) ++sei39;
+                    off += 4 + len;
+                }
+            }
+            if (nals == 0) {
+                for (size_t i = 0; i + 4 < n; ++i) {
+                    if (p[i] != 0 || p[i + 1] != 0) continue;
+                    size_t hdr = 0;
+                    if (p[i + 2] == 1) hdr = i + 3;
+                    else if (p[i + 2] == 0 && p[i + 3] == 1) hdr = i + 4;
+                    else continue;
+                    if (hdr + 1 >= n) break;
+                    ++nals;
+                    const int type = (p[hdr] >> 1) & 0x3F;
+                    if (type == 62) ++rpu62;
+                    if (type == 39) ++sei39;
+                    i = hdr;
+                }
+            }
+            log::info("source-cm4", std::format("probe bytes={} nals={} lengthForm={} rpu62={} sei39={}",
+                n, nals, lengthPrefixed, rpu62, sei39));
+        }
+    }
 
+    // Custom (完整 C): the creative anchors ride on the base packet, whatever the
+    // enhancement layer does, so parse them before any early return.
+    parseCm4FromBasePacket(packet);
     if (!elLayerEnabled_ || packet == nullptr || packet->data == nullptr || packet->size <= 0) return true;
     // The enhancement layer is sparse by design here: only about half the base
     // frames carry one, in a repeating pattern. An empty packet is normal, and it
@@ -465,7 +552,7 @@ bool MediaFileSource::feedEnhancementLayer(const AVPacket* packet) {
                         uint8_t* copy = static_cast<uint8_t*>(av_mallocz(payloadBytes + AV_INPUT_BUFFER_PADDING_SIZE));
                         if (copy != nullptr) {
                             memcpy(copy, p + payloadOff, payloadBytes);
-                            ok = source::decodeRpuWithLibDovi(copy, payloadBytes, elDoviMeta_);
+                            ok = source::decodeRpuWithLibDovi(copy, payloadBytes, elDoviMeta_, &elDoviCm4_);
                             av_free(copy);
                         }
                     }
@@ -563,6 +650,8 @@ void MediaFileSource::closeEnhancementLayer() {
     if (elFrame_ != nullptr) { av_frame_free(&elFrame_); elFrame_ = nullptr; }
 #if VEYRA_HAVE_LIBDOVI
     if (elDoviMeta_ != nullptr) { av_free(elDoviMeta_); elDoviMeta_ = nullptr; elDoviMetaValid_ = false; }
+    if (cm4Meta_ != nullptr) { av_free(cm4Meta_); cm4Meta_ = nullptr; }
+    baseCm4_ = pipeline::DoviCm4Info{}; baseCm4Valid_ = false;
 #endif
     elParamSets_.clear();
     elLayerOpen_ = false;
@@ -1344,6 +1433,7 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
     // null at this point even when this frame will get one.
     {
         const AVDOVIMetadata* metaPtr = nullptr;
+        bool metaFromEnhancementLayer = false;
         if (const auto* metaSide = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
             metaSide != nullptr && metaSide->size >= sizeof(AVDOVIMetadata)) {
             metaPtr = reinterpret_cast<const AVDOVIMetadata*>(metaSide->data);
@@ -1352,9 +1442,35 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
         else if (elDoviMetaValid_ && elDoviMeta_ != nullptr) {
             // RPU came from the enhancement layer via libdovi (see attachEnhancementLayer).
             metaPtr = elDoviMeta_;
+            metaFromEnhancementLayer = true;
         }
 #endif
         if (metaPtr != nullptr) {
+            // Custom (完整 C): creative anchors. The enhancement-layer path carries
+            // them out of libdovi (L8 included); FFmpeg's own side data stops at L2.
+            // L1 stays wherever FFmpeg put it, but CM4 prefers the libdovi parse:
+            // it is the only path that exposes L8, and FFmpeg's AVDOVIMetadata has
+            // no level-8/9 members at all.
+            const bool elCm4Usable = elDoviMetaValid_ && elDoviCm4_.valid();
+            if (metaFromEnhancementLayer || elCm4Usable) doviFrameInfo.cm4 = elDoviCm4_;
+            else if (baseCm4Valid_) doviFrameInfo.cm4 = baseCm4_;
+            else fillDoviCm4FromFfmpeg(*metaPtr, doviFrameInfo.cm4);
+            if (!cm4Reported_ && doviFrameInfo.cm4.valid()) {
+                cm4Reported_ = true;
+                const auto& anchors = doviFrameInfo.cm4;
+                std::string detail;
+                for (int i = 0; i < anchors.count; ++i) {
+                    const auto& a = anchors.anchors[std::size_t(i)];
+                    detail += std::format(" [{} target={:.0f}nits L8={} chromaW={} satGain={} slope={} offset={} power={}]",
+                        i, pipeline::cm4PqToNits(double(a.targetMaxPq) / 4095.0),
+                        a.fromLevel8 ? 1 : 0, a.trimChromaWeight, a.trimSaturationGain,
+                        a.trimSlope, a.trimOffset, a.trimPower);
+                }
+                log::info("source-cm4", std::format("anchors={} fromEL={} elParsed={} sourcePrimary={} contentType={}{}",
+                    int(anchors.count), metaFromEnhancementLayer ? 1 : 0,
+                    int(elDoviCm4_.count), int(anchors.sourcePrimaryIndex),
+                    int(anchors.contentType), detail));
+            }
             const auto& meta = *metaPtr;
             // Custom (DV extension blocks): which metadata levels this stream
             // declares, and the L5 active-area rectangle when there is one. L5 says
