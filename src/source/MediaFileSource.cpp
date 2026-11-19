@@ -498,7 +498,7 @@ bool MediaFileSource::feedEnhancementLayer(const AVPacket* packet) {
     // enhancement layer does, so parse them before any early return. Throttled: a
     // full libdovi parse per frame is measurable next to the P7 reconstruction, and
     // L2 only moves when the scene does.
-    if ((sequence_ % 15) == 1) parseCm4FromBasePacket(packet);
+    if ((sequence_ % 15) == 0) parseCm4FromBasePacket(packet);
     if (!elLayerEnabled_ || packet == nullptr || packet->data == nullptr || packet->size <= 0) return true;
     // The enhancement layer is sparse by design here: only about half the base
     // frames carry one, in a repeating pattern. An empty packet is normal, and it
