@@ -65,6 +65,10 @@ inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadat
     // Needed when rebuilding fixed-point coefficients (poly_coef = int << denom + frac).
     const int coefLog2Denom = int(header->coefficient_log2_denom);
     dovi_rpu_free_header(header);
+    // A shift by >= 63 on int64_t is undefined behaviour and a negative shift is
+    // worse; the reverse path (DolbyVisionRpuDecode.h) already validates 13..32, so
+    // treat anything outside a sane window as an unusable RPU rather than shifting.
+    if (coefLog2Denom < 0 || coefLog2Denom > 32) { dovi_rpu_free(rpu); return false; }
 
     const DoviRpuDataMapping* mapping = dovi_rpu_get_data_mapping(rpu);
     if (mapping == nullptr) { dovi_rpu_free(rpu); return false; }
@@ -116,6 +120,10 @@ inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadat
             const DoviPolynomialCurve* poly = src.polynomial;
             if (poly == nullptr) continue;
             for (int i = 0; i < pieces; ++i) {
+                // The order array is not guaranteed to be as long as the piece count
+                // (a malformed RPU can encode fewer), and reading past it feeds
+                // garbage into the curve.
+                if (size_t(i) >= poly->poly_order_minus1.len) break;
                 const int order = int(poly->poly_order_minus1.data[i]) + 1;
                 // AVDOVIReshapingCurve::poly_coef holds three coefficients (x^0..x^2);
                 // anything larger would write past the row.
@@ -141,6 +149,7 @@ inline bool decodeRpuWithLibDovi(const uint8_t* data, size_t size, AVDOVIMetadat
             const DoviMMRCurve* mmr = src.mmr;
             if (mmr == nullptr) continue;
             for (int i = 0; i < pieces; ++i) {
+                if (size_t(i) >= mmr->mmr_order_minus1.len) break;
                 const int order = int(mmr->mmr_order_minus1.data[i]) + 1;
                 // mmr_coef's second dimension is three (order - 1).
                 if (order < 1 || order > 3) break;
