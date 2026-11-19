@@ -80,8 +80,9 @@ int main() {
               "lookup at the master peak reaches the last entry");
         check(close(doviTableAt(plan, 10.0), 0.0), "lookup at black is zero");
         check(close(doviTableAt(plan, 5.0), 0.0), "lookup below black is zero");
-        check(close(doviTableAt(plan, plan.sourcePeakNits + 50.0), 0.0),
-              "lookup above the master peak is refused, not clamped");
+        check(close(doviTableAt(plan, plan.sourcePeakNits + 50.0),
+                    plan.extra[kDoviExtraEntries - 1], 1e-4),
+              "lookup above the smoothed peak clamps to the top of the table");
         const double middle = 10.0 + (plan.sourcePeakNits - 10.0) * 0.5;
         check(doviTableAt(plan, middle) > 0.0 && doviTableAt(plan, middle) < plan.extra[kDoviExtraEntries - 1],
               "half-way luminance lands between the ends");
@@ -238,6 +239,34 @@ int main() {
             const double greyGain = greyOut[0] / grey[0];
             check(tintedGain < greyGain, "a saturated pixel is lifted less than a neutral one");
         }
+    }
+
+    // ---- 11b) an L2-only anchor has no per-secondary vectors ----
+    //
+    // L2 blocks carry the scalar trims but not the six saturation/hue vectors, and
+    // libdovi leaves those fields zero. Decoding that zero as a value gave
+    // |log2(0/128)| = 7.0 and |0-128|/128 = 1.0, which pinned the hue table at 8.0
+    // and pushed every CM v2.9 frame to the 0.65 floor. Zero means "absent".
+    {
+        DoviCm4Info cm4;
+        cm4.count = 1;
+        auto& a = cm4.anchors[0];
+        a.targetMaxPq = uint16_t(std::lround(cm4NitsToPq(1000.0) * 4095.0));
+        a.trimChromaWeight = 3200;
+        a.trimSaturationGain = 3000;
+        a.fromLevel8 = false;   // L2 compatibility block: vectors stay zero
+        DoviExpansionInput in;
+        in.sourcePeakNits = 300.0; in.sceneAvgNits = 60.0; in.displayPeakNits = 1000.0; in.valid = true;
+        const auto plan = buildDoviExpansion(in, &cm4);
+        check(plan.active && plan.colorValid, "L2 anchor: the scalar colour table is carried");
+        double maxHue = 0.0;
+        for (int k = 0; k < 65; ++k) maxHue = std::max(maxHue, std::fabs(double(plan.hue[std::size_t(k)])));
+        check(maxHue < 1e-6, "L2 anchor: no secondary hue terms");
+        check(plan.chroma > 0.1 && plan.saturation > 0.1, "L2 anchor: the scalar coefficients survive");
+        const double tinted[3] = {400.0, 120.0, 40.0};
+        const double restraint = doviColorRestraint(plan, tinted);
+        check(restraint > 0.65 && restraint < 1.0,
+              "L2 anchor: restraint comes from the scalars only, not the floor");
     }
 
     // ---- 12) no anchors: the restraint is the identity ----

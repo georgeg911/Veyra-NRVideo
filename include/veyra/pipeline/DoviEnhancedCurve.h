@@ -70,8 +70,9 @@ inline double smoothstepRange(double lo, double hi, double x) {
 inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in,
                                             const DoviCm4Info* cm4 = nullptr) {
     DoviExpansionPlan plan;
-    if (!in.valid || !(in.sourcePeakNits > 10.0) || in.sourcePeakNits > 10000.0 ||
-        !(in.displayPeakNits > 10.0)) {
+    if (!in.valid || !std::isfinite(in.sourcePeakNits) || !(in.sourcePeakNits > 10.0) ||
+        in.sourcePeakNits > 10000.0 || !std::isfinite(in.displayPeakNits) ||
+        !(in.displayPeakNits > 10.0) || in.displayPeakNits > 10000.0) {
         return plan;
     }
     plan.sourcePeakNits = in.sourcePeakNits;
@@ -133,16 +134,17 @@ inline DoviExpansionPlan buildDoviExpansion(const DoviExpansionInput& in,
     // Custom (完整 C): colour restraint. The anchors are resolved against the
     // display peak the expansion was sized for, exactly as CB1 resolves them
     // against the configured target.
-    if (active && selection.valid()) {
-        {
-            DoviCm4ColorTable table;
-            buildDoviCm4ColorTable(*cm4, selection, table);
-            if (table.valid) {
-                plan.colorValid = true;
-                plan.chroma = float(table.chroma);
-                plan.saturation = float(table.saturation);
-                for (int k = 0; k < 65; ++k) plan.hue[std::size_t(k)] = float(table.hue[std::size_t(k)]);
-            }
+    // CB1 rejects the whole frame when any anchor is unusable; keep the weaker rule
+    // here (the expansion still runs) but do not engage the colour gate from a
+    // selection whose retention could not be built.
+    if (active && selection.valid() && haveRetention) {
+        DoviCm4ColorTable table;
+        buildDoviCm4ColorTable(*cm4, selection, table);
+        if (table.valid) {
+            plan.colorValid = true;
+            plan.chroma = float(table.chroma);
+            plan.saturation = float(table.saturation);
+            for (int k = 0; k < 65; ++k) plan.hue[std::size_t(k)] = float(table.hue[std::size_t(k)]);
         }
     }
     return plan;
@@ -156,11 +158,27 @@ inline void transitionDoviExpansion(DoviExpansionPlan& plan,
                                     bool reset) {
     if (reset || !(dtSeconds > 0.0) || dtSeconds > 1.0) return;
     if (!plan.active || !previous.active) return;
-    double change = 0.0;
+    double change = 0.0, maximum = 0.0;
     for (int k = 0; k < kDoviExtraEntries; ++k) {
+        const auto idx = std::size_t(k);
         change = std::max(change,
-                          std::fabs(double(plan.extra[std::size_t(k)]) -
-                                    double(previous.extra[std::size_t(k)])));
+                          std::fabs(double(plan.extra[idx]) - double(previous.extra[idx])));
+        maximum = std::max(maximum,
+                           std::max(double(plan.extra[idx]), double(previous.extra[idx])));
+    }
+    // Custom (完整 C): CB1 also charges the colour table's movement to the same
+    // budget (change += .5*(|dcolor0|+|dcolor1|+sector)*maximum), otherwise a cut
+    // could switch the hue layout at full speed while the lift was throttled.
+    if (plan.colorValid) {
+        double sector = 0.0;
+        for (int k = 0; k < 65; ++k) {
+            const double prev = previous.colorValid ? double(previous.hue[std::size_t(k)]) : 0.0;
+            sector = std::max(sector, std::fabs(double(plan.hue[std::size_t(k)]) - prev));
+        }
+        const double prevChroma = previous.colorValid ? double(previous.chroma) : 0.0;
+        const double prevSaturation = previous.colorValid ? double(previous.saturation) : 0.0;
+        change += 0.5 * (std::fabs(double(plan.chroma) - prevChroma) +
+                         std::fabs(double(plan.saturation) - prevSaturation) + sector) * maximum;
     }
     if (!(change > 1e-9)) return;
     const double target = std::max(plan.displayPeakNits, plan.sourcePeakNits);
@@ -172,15 +190,21 @@ inline void transitionDoviExpansion(DoviExpansionPlan& plan,
         plan.extra[idx] = float(previous.extra[idx] +
                                 (plan.extra[idx] - previous.extra[idx]) * alpha);
     }
-    // Custom (完整 C): CB1 eases the colour table by the same alpha, so a cut
-    // cannot snap the restraint from one hue layout to another.
-    if (plan.colorValid && previous.colorValid) {
+    // Custom (完整 C): ease the colour table by the same alpha. When the previous
+    // plan carried no table (the anchors just appeared) the reference is zero, not
+    // the identity, so the restraint ramps in instead of switching on at full
+    // strength for one frame.
+    if (plan.colorValid) {
         for (int k = 0; k < 65; ++k) {
             const auto idx = std::size_t(k);
-            plan.hue[idx] = float(previous.hue[idx] + (plan.hue[idx] - previous.hue[idx]) * alpha);
+            const double prev = previous.colorValid ? double(previous.hue[idx]) : 0.0;
+            plan.hue[idx] = float(prev + (double(plan.hue[idx]) - prev) * alpha);
         }
-        plan.chroma = float(previous.chroma + (plan.chroma - previous.chroma) * alpha);
-        plan.saturation = float(previous.saturation + (plan.saturation - previous.saturation) * alpha);
+        const double prevChroma = previous.colorValid ? double(previous.chroma) : 0.0;
+        const double prevSaturation = previous.colorValid ? double(previous.saturation) : 0.0;
+        plan.chroma = float(prevChroma + (double(plan.chroma) - prevChroma) * alpha);
+        plan.saturation = float(prevSaturation + (double(plan.saturation) - prevSaturation) * alpha);
+        plan.colorValid = true;
     }
 }
 
@@ -197,11 +221,13 @@ inline void transitionDoviExpansion(DoviExpansionPlan& plan,
 // the shader indexes with: the table is addressed by the source's own nits.
 inline double doviTableAt(const DoviExpansionPlan& plan, double nits) {
     if (!(nits > 10.0) || !(plan.sourcePeakNits > 10.0)) return 0.0;
-    // CB1 refuses a pixel above the master peak instead of clamping its index: the
-    // metadata then disagrees with the picture, and the brightest content must not
-    // collect the largest lift. The 0.1% tolerance absorbs the BT.2020 weight
-    // rounding at exactly the master, which would otherwise reject the top step.
-    if (nits > plan.sourcePeakNits * 1.001) return 0.0;
+    // CB1's lookup() clamps the index rather than refusing the sample, and so does
+    // this. Refusing was wrong twice over: `sourcePeakNits` is the *smoothed* L1
+    // peak, so on a brightening shot a pixel just above it lost its entire lift
+    // while its neighbour kept it (a 0.2% input step became a 2x output step, which
+    // reads as a broken highlight edge), and the contract's guard is per frame, not
+    // per pixel. Above the peak the entry saturates, and because the lift is applied
+    // as a ratio of the pixel's own luminance it self-limits instead of blowing up.
     const double u = std::clamp((nits - 10.0) / (plan.sourcePeakNits - 10.0), 0.0, 1.0) *
                      double(kDoviExtraEntries - 1);
     const int index = std::min(int(u), kDoviExtraEntries - 2);

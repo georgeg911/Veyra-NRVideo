@@ -180,10 +180,15 @@ private:
     // One small upload buffer per frame queued; the presentation ring holds three
     // lists, so a fourth slot is never still being read when it is rewritten.
     static constexpr unsigned kDoviTableSlots = 4;
-    // 257 expansion entries + 65 hue entries + 4 colour scalars, rounded up to the
-    // 256-byte CBV alignment every slot needs (custom, 完整 C).
-    static constexpr unsigned kDoviTableSlotBytes = 1344;
+    // 1328 bytes of data (83 float4s: 257 expansion + 65 hue + 3 colour scalars,
+    // padded to float4). The slot stride must be a multiple of 256 because a root
+    // CBV's address is a constant-buffer address and D3D12 requires
+    // D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT (256) for it - an earlier
+    // 1344 stride left slots 1..3 misaligned, which NVIDIA tolerates but GCN/RDNA
+    // and Intel do not (they drop the low address bits).
+    static constexpr unsigned kDoviTableSlotBytes = 1536;  // 6 * 256
     static constexpr unsigned kDoviTableFloatsPerSlot = kDoviTableSlotBytes / sizeof(float);
+    static_assert(kDoviTableSlotBytes % 256 == 0, "root CBV needs 256-byte placement alignment");
     Microsoft::WRL::ComPtr<ID3D12Resource> doviTable_;
     float* doviTableMapped_ = nullptr;
     unsigned doviTableSlot_ = 0, doviTableBound_ = 0;

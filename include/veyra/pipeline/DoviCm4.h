@@ -44,7 +44,11 @@ struct DoviCm4Anchor {
     bool fromLevel8 = false;
 };
 
-inline constexpr int kDoviCm4MaxAnchors = 2;
+// How many anchors the packet carries. L2 lists commonly hold three or more target
+// displays; truncating the stream order to two and only then choosing the bracket
+// made a 3-entry list (100/600/1000) serve a 1000-nit display from the 600 entry.
+// Only two ever take part in the arithmetic (see DoviCm4Selection).
+inline constexpr int kDoviCm4MaxAnchors = 8;
 
 // Everything the expansion needs to know about creative metadata for one frame.
 // `count == 0` means the frame carried no usable anchor, and callers must then
@@ -165,16 +169,35 @@ inline void buildDoviCm4ColorTable(const DoviCm4Info& info,
         const auto log2Ratio = [](double value, double centre) {
             return std::fabs(std::log2(std::max(value / centre, 1e-3)));
         };
-        chroma += weight * log2Ratio(double(a.trimChromaWeight), 2048.0);
-        saturation += weight * log2Ratio(double(a.trimSaturationGain), 2048.0);
+        // A zero word means "field absent" (libdovi leaves missing fields at 0) and
+        // Dolby specifies inferring 2048, i.e. neutral. Treating the literal 0 as a
+        // value would turn it into |log2(0/2048)| ~= 10 and dominate the gate.
+        const auto wordOrNeutral = [](uint16_t w) { return w == 0 ? 2048.0 : double(w); };
+        chroma += weight * log2Ratio(wordOrNeutral(a.trimChromaWeight), 2048.0);
+        saturation += weight * log2Ratio(wordOrNeutral(a.trimSaturationGain), 2048.0);
+
+        // The six per-secondary vectors exist only on L8, and a short L8 block
+        // (length 10/12/13) leaves them zero. Zero is not a creative statement:
+        // CB1 treats an L2 anchor as neutral here. Decoding those zeros as values
+        // gave every CM v2.9 frame |log2(0/128)| ~= 7 and |0-128|/128 = 1, which
+        // pinned the hue table at 8.0 and the restraint at its 0.65 floor.
+        bool hasVectors = false;
+        if (a.fromLevel8) {
+            for (int j = 0; j < 6; ++j)
+                hasVectors = hasVectors || a.saturationVector[std::size_t(j)] != 0 ||
+                                          a.hueVector[std::size_t(j)] != 0;
+        }
+        if (!hasVectors) return;
         for (int j = 0; j < 6; ++j) {
             const auto idx = std::size_t(j);
-            // Secondary saturation: an unsigned byte around 128.
+            // Secondary saturation: an unsigned byte around 128. A single absent
+            // entry stays neutral rather than becoming extreme.
             const double sv = double(a.saturationVector[idx]);
-            gain[idx] += weight * log2Ratio(sv > 0.0 ? sv : 1.0, 128.0);
+            gain[idx] += weight * log2Ratio(sv > 0.0 ? sv : 128.0, 128.0);
             // Rotation: deviation from neutral, in units of pi/12 as the contract
-            // specifies.
-            rotation[idx] += weight * std::fabs(double(a.hueVector[idx]) - 128.0) / 128.0;
+            // specifies. An absent entry is zero rotation, not a full one.
+            const double hv = double(a.hueVector[idx]);
+            rotation[idx] += weight * (hv > 0.0 ? std::fabs(hv - 128.0) / 128.0 : 0.0);
             // The six secondaries sit on 60-degree spokes.
             centre[idx] += weight * (double(j) * kStep - 3.141592653589793);
         }

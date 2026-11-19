@@ -201,7 +201,15 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
         bool ok = ready && graph.applySettings(settings) && present(5);
         if (ok) neutralShown = shown;
         presenter.setFrameDovi(anchorTrimmed);
-        ok = ok && present(6);
+        // CB1's bounded transition now charges the colour table to the same budget
+        // as the lift, so a real player eases the gate in over a few seconds. This
+        // test has no frame interval, so the easing would never progress: clear the
+        // previous plan with one expansion-off frame, after which the transition
+        // adopts the new table directly.
+        engine::EnhancementSettings off = settings;
+        off.doviEnhanced = false;
+        ok = ok && graph.applySettings(off) && present(6);
+        ok = ok && graph.applySettings(settings) && present(7);
         if (ok) trimmedShown = shown;
         check(ok, "gated presentations succeed");
         if (ok && neutralShown.size() == shown.size()) {

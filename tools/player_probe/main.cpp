@@ -466,7 +466,7 @@ int main(int argc, char** argv)
                 dvHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
                 D3D12_RESOURCE_DESC dvDesc{};
                 dvDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                dvDesc.Width = 1280;
+                dvDesc.Width = 1536;
                 dvDesc.Height = 1;
                 dvDesc.DepthOrArraySize = 1;
                 dvDesc.MipLevels = 1;
@@ -479,7 +479,7 @@ int main(int argc, char** argv)
                 }
                 void* dvMapped = nullptr;
                 if (SUCCEEDED(doviTableZero->Map(0, nullptr, &dvMapped)) && dvMapped)
-                    std::memset(dvMapped, 0, 1280);
+                    std::memset(dvMapped, 0, 1536);
             }
             D3D12_DESCRIPTOR_HEAP_DESC rh{};
             rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;

@@ -90,22 +90,15 @@ float DoviExtraAt(int k)
     return lane == 0 ? v.x : (lane == 1 ? v.y : (lane == 2 ? v.z : v.w));
 }
 
-// This is CB1's cb1_dv_enhanced_pixel reduced to the parts Veyra has data for
-// (no CM4 creative anchors, so no hue-dependent retention): look the lift up by
-// the BT.2020 luminance, turn it into a ratio of that luminance, then cap the
-// ratio with a soft knee so expansion never overshoots the display ceiling in a
-// single step. `dvp.x` is the master peak the table is indexed against, `dvp.y`
+// CB1's cb1_dv_enhanced_pixel: look the lift up by the BT.2020 luminance, turn it
+// into a ratio of that luminance, restrain it by the creative anchors' colour
+// table (DoviColorRestraint), then cap the ratio with a soft knee so expansion
+// never overshoots the display ceiling in a single step. `dvp.x` is the master peak the table is indexed against, `dvp.y`
 // the ceiling the picture may reach.
 float3 DoviExpand(float3 nits, float4 dvp)
 {
     const float y = dot(nits, float3(.2627, .6780, .0593));
     if (y <= 10.0 || dvp.x <= 10.0) return nits;
-    // Above the master peak the metadata and the picture disagree (a bad RPU, or
-    // HDR10+ SEI describing a different grade). CB1 refuses those pixels and so
-    // does this: clamping the index would hand the brightest content the largest
-    // lift, which is the opposite of what a headroom expansion should do. The
-    // 0.1% tolerance absorbs the BT.2020 weight rounding at exactly the master.
-    if (y > dvp.x * 1.001) return nits;
     const float u = saturate((y - 10.0) / max(dvp.x - 10.0, 1e-3)) * 256.0;
     const int index = min(int(u), 255);
     float extra = lerp(DoviExtraAt(index), DoviExtraAt(index + 1), u - float(index));
