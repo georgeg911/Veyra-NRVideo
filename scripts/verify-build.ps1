@@ -66,7 +66,7 @@ if ($SkipBuild) {
         }
     }
     if (-not (Test-Path $vcvars)) { Fail "找不到 vcvars64.bat: $vcvars" }
-    $targets = 'veyra_qml_ui veyra_preset_library_tests veyra_effect_chain_tests veyra_repair_contract_tests veyra_live_timing_tests veyra_dovi_enhanced_curve_tests'
+    $targets = 'veyra_qml_ui veyra_preset_library_tests veyra_effect_chain_tests veyra_repair_contract_tests veyra_live_timing_tests veyra_dovi_enhanced_curve_tests veyra_dovi_cm4_trim_tests'
     $cmd = "call `"$vcvars`" >nul && cmake --build `"$BuildDir`" --target $targets -j 2"
     cmd /c $cmd
     if ($LASTEXITCODE -ne 0) { Fail "构建失败（exit $LASTEXITCODE）" } else { Ok '构建通过' }
@@ -93,7 +93,7 @@ if ($ffmpegBin) {
 } else {
     Info '未找到 FFmpeg bin，若测试报 0xC0000135 请检查 CMakeCache 的 VEYRA_FFMPEG_ROOT'
 }
-$tests = @('veyra_preset_library_tests', 'veyra_effect_chain_tests', 'veyra_repair_contract_tests', 'veyra_live_timing_tests', 'veyra_dovi_enhanced_curve_tests')
+$tests = @('veyra_preset_library_tests', 'veyra_effect_chain_tests', 'veyra_repair_contract_tests', 'veyra_live_timing_tests', 'veyra_dovi_enhanced_curve_tests', 'veyra_dovi_cm4_trim_tests')
 foreach ($t in $tests) {
     $exe = Join-Path $BuildDir "$t.exe"
     if (-not (Test-Path $exe)) { Fail "$t.exe 不存在"; continue }
