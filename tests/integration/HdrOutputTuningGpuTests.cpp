@@ -79,11 +79,14 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
     frame->color_primaries=AVCOL_PRI_BT2020;frame->color_trc=AVCOL_TRC_SMPTE2084;
     if(av_frame_get_buffer(frame,32)<0){av_frame_free(&frame);return 2;}
     for(unsigned y=0;y<16;++y)for(unsigned x=0;x<64;++x){
-        reinterpret_cast<uint16_t*>(frame->data[0]+y*frame->linesize[0])[x]=uint16_t(std::lround(64+876*hdrRoundTrip::pq(patches[x/4])));
-        // Rows 0..7 stay neutral; rows 8..15 carry the same luminance with a strong
-        // chroma offset, which is what the IPT gate has to react to.
+        // Rows 0..7 are the neutral ramp used by every other check. Rows 8..15 carry
+        // HALF the luminance plus a moderate chroma offset: the offset raises R, and a
+        // full-luminance saturated row would land above the master peak, where the
+        // expansion refuses to run at all (so it could never exercise the gate).
+        const double patch=patches[x/4]*(y<8?1.0:0.5);
+        reinterpret_cast<uint16_t*>(frame->data[0]+y*frame->linesize[0])[x]=uint16_t(std::lround(64+876*hdrRoundTrip::pq(patch)));
         if(!(y%2)&&!(x%2))for(unsigned c=1;c<3;++c)
-            reinterpret_cast<uint16_t*>(frame->data[c]+y/2*frame->linesize[c])[x/2]= (y<8||c==1)?512:900;
+            reinterpret_cast<uint16_t*>(frame->data[c]+y/2*frame->linesize[c])[x/2]= (y<8||c==1)?512:560;
     }
     pipeline::EnhanceGraph graph(ctx,ring);pipeline::EnhanceGraphDesc gd;
     gd.sourceWidth=gd.workWidth=64;gd.sourceHeight=gd.workHeight=16;
@@ -211,15 +214,8 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
             check(std::abs(trimmedOnlyLift - neutralOnlyLift) < 1.0,
                   "neutral grey is unaffected by a trimmed anchor");
             check(neutralLift > 150.0, "neutral anchor still expands the saturated row");
-            // Known gap: the shader-side gate does not change the readback yet even
-            // though the plan carries the table (dovi-expand reports color=1
-            // chroma=0.644 sat=0.644). Recorded rather than asserted so the rest of
-            // the suite stays green while this is chased down.
-            if (trimmedLift < neutralLift - 1.0)
-                check(true, "a trimmed anchor expands the saturated row less");
-            else
-                std::cout << "DV_GATE_UNVERIFIED shader gate did not reduce the lift"
-                          << std::endl;
+            check(trimmedLift < neutralLift - 1.0,
+                  "a trimmed anchor expands the saturated row less");
             const auto rgbAt=[&](const std::vector<float>& v,unsigned row){
                 const size_t base=(size_t(row)*64+size_t(12*4+2))*3;
                 return std::array<double,3>{double(v.at(base))*80.0,double(v.at(base+1))*80.0,double(v.at(base+2))*80.0};
