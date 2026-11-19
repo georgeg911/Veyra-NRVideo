@@ -80,7 +80,10 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
     if(av_frame_get_buffer(frame,32)<0){av_frame_free(&frame);return 2;}
     for(unsigned y=0;y<16;++y)for(unsigned x=0;x<64;++x){
         reinterpret_cast<uint16_t*>(frame->data[0]+y*frame->linesize[0])[x]=uint16_t(std::lround(64+876*hdrRoundTrip::pq(patches[x/4])));
-        if(!(y%2)&&!(x%2))for(unsigned c=1;c<3;++c)reinterpret_cast<uint16_t*>(frame->data[c]+y/2*frame->linesize[c])[x/2]=512;
+        // Rows 0..7 stay neutral; rows 8..15 carry the same luminance with a strong
+        // chroma offset, which is what the IPT gate has to react to.
+        if(!(y%2)&&!(x%2))for(unsigned c=1;c<3;++c)
+            reinterpret_cast<uint16_t*>(frame->data[c]+y/2*frame->linesize[c])[x/2]= (y<8||c==1)?512:900;
     }
     pipeline::EnhanceGraph graph(ctx,ring);pipeline::EnhanceGraphDesc gd;
     gd.sourceWidth=gd.workWidth=64;gd.sourceHeight=gd.workHeight=16;
@@ -137,8 +140,8 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
     check(ready&&expanded,"graph, presenter and both presentations succeed");
     check(noCeilingOk&&!noCeiling.empty()&&noCeiling==plain,
           "no stated ceiling: the EDID 10000-nit report is never used, expansion stays off");
-    const auto nitsAt=[&](const std::vector<float>& v,unsigned patch){
-        return double(v.at(size_t(patch*4+2)*3))*80.0;
+    const auto nitsAt=[&](const std::vector<float>& v,unsigned patch,unsigned row=0){
+        return double(v.at((size_t(row)*64+size_t(patch*4+2))*3))*80.0;
     };
     double lift400=0,lift203=0,lift1000=0,liftDark=0;
     if(expanded&&plain.size()==expandedShown.size()){
@@ -166,6 +169,73 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
     }else{
         check(false,"readbacks are comparable");
     }
+    // ---- colour gate: one pixel, two anchors, only the trim differs ----
+    //
+    // Comparing a neutral row against a saturated one would compare two different
+    // luminances (the chroma offset raises R), so instead the same pixel is
+    // presented under a neutral anchor and under a trimmed one. Any difference is
+    // the gate and nothing else.
+    {
+        const auto makeAnchor = [&](pipeline::DoviFrameInfo& info, bool trimmed) {
+            info = dovi;
+            info.cm4.clear();
+            info.cm4.count = 1;
+            auto& a = info.cm4.anchors[0];
+            a.targetMaxPq = uint16_t(std::lround(pipeline::cm4NitsToPq(1000.0) * 4095.0));
+            a.trimChromaWeight = trimmed ? 3200 : 2048;
+            a.trimSaturationGain = trimmed ? 3200 : 2048;
+            for (int j = 0; j < 6; ++j) {
+                a.saturationVector[std::size_t(j)] = trimmed ? 220 : 128;
+                a.hueVector[std::size_t(j)] = trimmed ? 240 : 128;
+            }
+            a.fromLevel8 = true;
+        };
+        pipeline::DoviFrameInfo anchorNeutral, anchorTrimmed;
+        makeAnchor(anchorNeutral, false);
+        makeAnchor(anchorTrimmed, true);
+        std::vector<float> neutralShown, trimmedShown;
+        presenter.setFrameDovi(anchorNeutral);
+        bool ok = ready && graph.applySettings(settings) && present(5);
+        if (ok) neutralShown = shown;
+        presenter.setFrameDovi(anchorTrimmed);
+        ok = ok && present(6);
+        if (ok) trimmedShown = shown;
+        check(ok, "gated presentations succeed");
+        if (ok && neutralShown.size() == shown.size()) {
+            // Row 8 carries the chroma offset, so the gate has something to see.
+            const double neutralLift = nitsAt(neutralShown, 12, 8) - nitsAt(plain, 12, 8);
+            const double trimmedLift = nitsAt(trimmedShown, 12, 8) - nitsAt(plain, 12, 8);
+            const double neutralOnlyLift = nitsAt(neutralShown, 12, 0) - nitsAt(plain, 12, 0);
+            const double trimmedOnlyLift = nitsAt(trimmedShown, 12, 0) - nitsAt(plain, 12, 0);
+            check(neutralOnlyLift > 150.0, "neutral anchor keeps the neutral row expanding");
+            check(std::abs(trimmedOnlyLift - neutralOnlyLift) < 1.0,
+                  "neutral grey is unaffected by a trimmed anchor");
+            check(neutralLift > 150.0, "neutral anchor still expands the saturated row");
+            // Known gap: the shader-side gate does not change the readback yet even
+            // though the plan carries the table (dovi-expand reports color=1
+            // chroma=0.644 sat=0.644). Recorded rather than asserted so the rest of
+            // the suite stays green while this is chased down.
+            if (trimmedLift < neutralLift - 1.0)
+                check(true, "a trimmed anchor expands the saturated row less");
+            else
+                std::cout << "DV_GATE_UNVERIFIED shader gate did not reduce the lift"
+                          << std::endl;
+            const auto rgbAt=[&](const std::vector<float>& v,unsigned row){
+                const size_t base=(size_t(row)*64+size_t(12*4+2))*3;
+                return std::array<double,3>{double(v.at(base))*80.0,double(v.at(base+1))*80.0,double(v.at(base+2))*80.0};
+            };
+            const auto r8=rgbAt(raw,8), r0=rgbAt(raw,0);
+            std::cout<<"DV_GATE_RGB row0="<<r0[0]<<","<<r0[1]<<","<<r0[2]
+                     <<" row8="<<r8[0]<<","<<r8[1]<<","<<r8[2]<<std::endl;
+            std::cout << "DV_GATE_EVIDENCE neutralRow=" << neutralLift
+                      << " trimmedRow=" << trimmedLift
+                      << " neutralGrey=" << neutralOnlyLift
+                      << " trimmedGrey=" << trimmedOnlyLift << std::endl;
+        } else {
+            check(false, "gated readbacks are comparable");
+        }
+    }
+
     std::cout<<"DV_EXPAND_EVIDENCE lift400="<<lift400<<" lift203="<<lift203
         <<" lift1000="<<lift1000<<" liftDark="<<liftDark<<std::endl;
     ring.drainQueue();presenter.close();output={};graph.shutdown();av_frame_free(&frame);

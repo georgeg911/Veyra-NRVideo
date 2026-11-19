@@ -394,9 +394,11 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
                 // right after the 257 expansion entries (floats 257..259 are pad).
                 float* hue=dst+pipeline::kDoviExtraEntries+3;   // 260
                 for(int k=0;k<65;++k)hue[k]=plan.colorValid?plan.hue[std::size_t(k)]:0.0f;
-                hue[65]=plan.colorValid?plan.chroma:0.0f;
-                hue[66]=plan.colorValid?plan.saturation:0.0f;
-                hue[67]=plan.colorValid?1.0f:0.0f;
+                // doviHue is a 17-float4 array (68 floats), so the scalars start at
+                // float 260+68 = 328, not right after the 65 table entries.
+                hue[68]=plan.colorValid?plan.chroma:0.0f;
+                hue[69]=plan.colorValid?plan.saturation:0.0f;
+                hue[70]=plan.colorValid?1.0f:0.0f;
                 doviTableSlot_=(doviTableSlot_+1)%kDoviTableSlots;
                 doviTableBound_=tableSlot;
                 doviExpansionActive=true;
