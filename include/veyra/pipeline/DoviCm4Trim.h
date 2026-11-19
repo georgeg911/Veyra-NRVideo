@@ -51,6 +51,29 @@ namespace veyra::pipeline {
 // retention 表的点数（契约的 257 个 knot，最后一个下标 = 256）。
 inline constexpr int kDoviRetentionEntries = 257;
 
+// 契约没有给出、由本实现补上的那些常数。
+//
+// 单独抽出来是为了将来拿到「CM v4.0 + L8 长块 + 向量非 128」的真实素材时，可以
+// 直接做 A/B 而不必改算子本体。默认值就是当前单测钉住的那一组；换成别的值必须
+// 同时补对应的测试，否则「已验证」的结论就不成立了。
+struct DoviCm4TrimTuning {
+    // 假设 A4：中调枢轴取锚点峰值的这个比例（经典 18% 灰）。另一个候选是绝对
+    // PQ 码值 0.5（约 93 nits），届时把这里设成 0 并改用下面的绝对枢轴。
+    double midContrastPivotFraction = 0.18;
+    // 假设 A4（备选）：>0 时直接用这个绝对 PQ 码值当枢轴，忽略上面的比例。
+    double midContrastPivotPq = 0.0;
+    // 假设 A4：枢轴在曲线里被夹到这个范围，避免端点退化。
+    double pivotMin = 0.05;
+    double pivotMax = 0.95;
+    // 假设 A5：clip 软膝从 1 - clipKneeScale*clipTrim 开始；0.5 是猜的。
+    double clipKneeScale = 0.5;
+    // 假设 A3 的防御边界：power 字值解码后夹到这个区间。
+    double powerMin = 0.1;
+    double powerMax = 4.0;
+
+    bool operator==(const DoviCm4TrimTuning&) const = default;
+};
+
 namespace dovi_cm4_trim_detail {
 
 // 12-bit 字 -> 控制量；2048 = 1.0（契约给定）。
@@ -67,10 +90,10 @@ inline double offsetOf(const DoviCm4Anchor& a) {
     return present(a.trimOffset) ? word(a.trimOffset) - 1.0 : 0.0;
 }
 
-inline double powerOf(const DoviCm4Anchor& a) {
+inline double powerOf(const DoviCm4Anchor& a, const DoviCm4TrimTuning& tuning) {
     const double p = present(a.trimPower) ? word(a.trimPower) : 1.0;
     // 防御非物理字值：极大/极小的幂在浮点上没有意义，也会让 r(u) 抖动。
-    return std::clamp(p, 0.1, 4.0);
+    return std::clamp(p, tuning.powerMin, tuning.powerMax);
 }
 
 // CM4 的 midtone/clipping 控制只在 L8 锚点上存在；L8 block 长度不足时
@@ -87,11 +110,12 @@ inline double clipTrimOf(const DoviCm4Anchor& a) {
 
 // 分段幂 S 曲线：amount > 0 提高中间调对比，< 0 降低；amount == 0 是精确恒等。
 // 0、pivot、1 三个点固定；1 以上按同一斜率延拓（retention 采样很少用到）。
-inline double midContrastCurve(double v, double amount, double pivot) {
+inline double midContrastCurve(double v, double amount, double pivot,
+                               const DoviCm4TrimTuning& tuning) {
     if (!(amount != 0.0) || !std::isfinite(v)) return v;
     const double exponent = 1.0 + amount;
     if (!(v > 0.0)) return 0.0;
-    pivot = std::clamp(pivot, 0.05, 0.95);
+    pivot = std::clamp(pivot, tuning.pivotMin, tuning.pivotMax);
     const double upper = 1.0 - pivot;
     if (v < pivot) return pivot * std::pow(v / pivot, exponent);
     if (v <= 1.0) return 1.0 - upper * std::pow((1.0 - v) / upper, exponent);
@@ -99,9 +123,9 @@ inline double midContrastCurve(double v, double amount, double pivot) {
 }
 
 // 高光软膝：只压缩 knee 以上，单调、不越过 1；amount <= 0 是恒等。
-inline double clipTrimCurve(double v, double amount) {
+inline double clipTrimCurve(double v, double amount, const DoviCm4TrimTuning& tuning) {
     if (!(amount > 0.0) || !std::isfinite(v) || !(v > 0.0)) return v;
-    const double knee = std::clamp(1.0 - 0.5 * amount, 0.0, 1.0);
+    const double knee = std::clamp(1.0 - tuning.clipKneeScale * amount, 0.0, 1.0);
     const double room = 1.0 - knee;
     if (!(room > 1e-9)) return 1.0;
     if (v <= knee) return v;
@@ -116,7 +140,8 @@ inline double clipTrimCurve(double v, double amount) {
 // 目标峰值取自 anchor.targetMaxPq（锚点自己的目标显示域）；没有可用锚点时是恒等，
 // 调用方可以放心地把未解码的 DoviCm4Anchor 传进来。非有限输入按 0 处理，
 // 输出始终 clamp 在 [0,10000]，不会给调用方 NaN/Inf。
-inline void doviTrimApply(const DoviCm4Anchor& anchor, const double rgbNits[3], double out[3]) {
+inline void doviTrimApply(const DoviCm4Anchor& anchor, const double rgbNits[3], double out[3],
+                          const DoviCm4TrimTuning& tuning = {}) {
     if (!rgbNits || !out) return;
     out[0] = rgbNits[0];
     out[1] = rgbNits[1];
@@ -130,11 +155,14 @@ inline void doviTrimApply(const DoviCm4Anchor& anchor, const double rgbNits[3], 
     using namespace dovi_cm4_trim_detail;
     const double slope = slopeOf(anchor);
     const double offset = offsetOf(anchor);
-    const double power = powerOf(anchor);
+    const double power = powerOf(anchor, tuning);
     const double mid = midContrastOf(anchor);
     const double clip = clipTrimOf(anchor);
-    // 假设 A4：中调枢轴 = 锚点峰值 18% 的中灰经 PQ 映射后的归一化码值。
-    const double midPivot = cm4NitsToPq(0.18 * peakNits) / targetPq;
+    // 假设 A4：中调枢轴。默认取锚点峰值 18% 的中灰经 PQ 映射后的归一化码值；
+    // tuning.midContrastPivotPq > 0 时改用绝对 PQ 码值（另一个候选）。
+    const double midPivot = tuning.midContrastPivotPq > 0.0
+        ? tuning.midContrastPivotPq / targetPq
+        : cm4NitsToPq(tuning.midContrastPivotFraction * peakNits) / targetPq;
 
     for (int j = 0; j < 3; ++j) {
         double nits = rgbNits[j];
@@ -147,8 +175,8 @@ inline void doviTrimApply(const DoviCm4Anchor& anchor, const double rgbNits[3], 
         double signal = slope * q + offset;
         if (!(signal > 0.0)) signal = 0.0;
         double v = std::pow(signal, power);
-        v = midContrastCurve(v, mid, midPivot);
-        v = clipTrimCurve(v, clip);
+        v = midContrastCurve(v, mid, midPivot, tuning);
+        v = clipTrimCurve(v, clip, tuning);
         const double outPq = std::clamp(v * targetPq, 0.0, 1.0);
         double value = cm4PqToNits(outPq);
         if (!std::isfinite(value)) value = 0.0;
@@ -165,7 +193,8 @@ inline void doviTrimApply(const DoviCm4Anchor& anchor, const double rgbNits[3], 
 inline bool buildDoviRetention(const DoviCm4Info& info,
                                const DoviCm4Selection& selection,
                                double masterNits,
-                               std::array<float, 257>& r) {
+                               std::array<float, 257>& r,
+                               const DoviCm4TrimTuning& tuning = {}) {
     r.fill(1.0f);
     if (!info.valid() || !selection.valid()) return false;
     // CB1: master <= 10 或 > 10000 视为无效（cb1-dve.c 的 build()）。
@@ -208,7 +237,7 @@ inline bool buildDoviRetention(const DoviCm4Info& info,
             const double sample = x * terms[i].peakNits;
             const double rgb[3] = {sample, sample, sample};
             double trimmed[3];
-            doviTrimApply(*terms[i].anchor, rgb, trimmed);
+            doviTrimApply(*terms[i].anchor, rgb, trimmed, tuning);
             const double denom = terms[i].peakNits * std::max(x, 1e-6);
             const double ratio = denom > 0.0 ? trimmed[0] / denom : 1.0;
             if (!std::isfinite(ratio)) return false;

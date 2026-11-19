@@ -359,6 +359,53 @@ int main() {
               "operator with a non-finite sample: output stays finite");
     }
 
+    // ---- tuning: the assumed constants are reachable, defaults unchanged ----
+    //
+    // A4 (the mid-contrast pivot) and A5 (the clip knee shape) are not in the
+    // contract, so they live in DoviCm4TrimTuning. Moving them must change the
+    // curve (that is what makes a future A/B possible), and the defaults must be
+    // exactly what the rest of this suite pins.
+    {
+        using namespace veyra::pipeline;
+        DoviCm4Anchor anchor = anchorAt(1000.0);
+        neutralise(anchor);
+        anchor.fromLevel8 = true;
+        anchor.targetMidContrast = 2400;   // non-neutral mid contrast
+        anchor.clipTrim = 2800;            // non-neutral clip
+
+        DoviCm4Info info;
+        info.count = 1;
+        info.anchors[0] = anchor;
+        const DoviCm4Selection sel =
+            selectDoviCm4Anchors(info, uint16_t(std::lround(cm4NitsToPq(1000.0) * 4095.0)));
+        check(sel.valid(), "tuning: the anchor resolves");
+
+        std::array<float, 257> rDefault{}, rExplicit{}, rPivot{}, rClip{};
+        check(buildDoviRetention(info, sel, 442.8, rDefault), "tuning: default build succeeds");
+        check(buildDoviRetention(info, sel, 442.8, rExplicit, DoviCm4TrimTuning{}),
+              "tuning: explicit default build succeeds");
+        check(rDefault == rExplicit, "tuning: explicit defaults match the implicit ones");
+
+        DoviCm4TrimTuning pivotTuning;
+        pivotTuning.midContrastPivotFraction = 0.5;
+        check(buildDoviRetention(info, sel, 442.8, rPivot, pivotTuning),
+              "tuning: pivot build succeeds");
+        check(rPivot != rDefault, "tuning: the mid-contrast pivot moves the curve");
+
+        DoviCm4TrimTuning clipTuning;
+        clipTuning.clipKneeScale = 0.0;   // knee pinned at 1.0 = no clipping
+        check(buildDoviRetention(info, sel, 442.8, rClip, clipTuning),
+              "tuning: clip build succeeds");
+        check(rClip != rDefault, "tuning: the clip knee scale moves the curve");
+
+        DoviCm4TrimTuning absolutePivot;
+        absolutePivot.midContrastPivotPq = 0.5;   // the contract's other candidate
+        std::array<float, 257> rAbsolute{};
+        check(buildDoviRetention(info, sel, 442.8, rAbsolute, absolutePivot),
+              "tuning: absolute pivot build succeeds");
+        check(rAbsolute != rDefault, "tuning: an absolute PQ pivot changes the curve");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "OK", failures,
                 failures == 1 ? "" : "s");
     return failures ? 1 : 0;
