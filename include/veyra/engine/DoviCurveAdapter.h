@@ -20,6 +20,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+
+#include "veyra/Log.h"
 
 namespace veyra::engine {
 
@@ -46,9 +49,26 @@ inline HdrCurveSettings doviCurveFromLevel1(const pipeline::DoviFrameInfo& dovi,
     peakNits = std::min(peakNits, kMaxSanePeakNits);
     if (!(peakNits > 0.0)) return userCurve;
     HdrCurveSettings out = userCurve;
+    // Custom (CB1-derived): the roll-off start follows the scene's own headroom
+    // instead of a fixed 0.85 of the peak. CB1's Adaptive HDR Mapping weighs the
+    // scene highlight against its midtone share; the same two terms are applied
+    // here to the knee only, which keeps the existing curve family intact while
+    // making a bright, low-midtone scene compress a little earlier.
+    const auto smoothstep = [](double lo, double hi, double x) {
+        const double t = std::clamp((x - lo) / (hi - lo), 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    };
+    const double sceneMidNits = pqToNits(smoothedAvgPq >= 0.0 ? smoothedAvgPq : dovi.avgPq);
+    const double amount = smoothstep(100.0, 400.0, peakNits) *
+        (1.0 - 0.5 * smoothstep(0.04, 0.30, sceneMidNits / std::max(peakNits, 1e-9)));
+    if (std::getenv("VEYRA_DOVI_TRACE") != nullptr) {
+        veyra::log::info("dovi-amount", std::format(
+            "peakNits={:.1f} midNits={:.1f} amount={:.4f} kneeNits={:.1f}",
+            peakNits, sceneMidNits, amount, peakNits * (1.0 - 0.15 * amount)));
+    }
     // Start the roll-off a little below the frame's own peak so it has headroom to
     // work with, but never below the 100 nit floor the sliders allow.
-    double kneeNits = peakNits * 0.85;
+    double kneeNits = peakNits * (1.0 - 0.15 * amount);
     if (useAverage) {
         // libplacebo's st2094_pick_knee uses the scene average rather than the peak:
         // a dark film's knee moves down (compresses earlier), a bright one moves up.
