@@ -240,6 +240,38 @@ static int doviExpansionPreview(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRin
         }
     }
 
+    // ---- a ceiling above the 1000-nit fallback must raise the roll-off too ----
+    //
+    // The expansion is sized against the stated ceiling; the roll-off closing point
+    // used to be hard-wired to 1000 when no peakCapNits was set, so a 2000-nit
+    // ceiling lifted the highlight and then compressed it straight back. Both frames
+    // here use the same curve, so the only difference is the expansion itself.
+    {
+        engine::EnhancementSettings wide = settings;
+        wide.hdrCurve.displayPeakNits = 2000;
+        wide.hdrCurve.peakCapNits = 0;
+        wide.hdrCurve.highlightStartNits = 0;
+        wide.doviEnhanced = false;
+        bool ok = ready && graph.applySettings(wide) && present(8);
+        std::vector<float> widePlain;
+        if (ok) widePlain = shown;
+        wide.doviEnhanced = true;
+        ok = ok && graph.applySettings(wide) && present(9);
+        std::vector<float> wideShown;
+        if (ok) wideShown = shown;
+        check(ok, "wide-ceiling presentations succeed");
+        if (ok && widePlain.size() == wideShown.size()) {
+            const double wideLift = nitsAt(wideShown, 12, 0) - nitsAt(widePlain, 12, 0);
+            std::cout << "DV_WIDE_CEILING lift400=" << lift400
+                      << " wideLift=" << wideLift << std::endl;
+            check(wideLift > lift400 * 1.2,
+                  "a 2000-nit ceiling lifts the 400-nit step further than the 1000 fallback");
+        } else {
+            check(false, "wide-ceiling readbacks are comparable");
+        }
+        graph.applySettings(settings);
+    }
+
     std::cout<<"DV_EXPAND_EVIDENCE lift400="<<lift400<<" lift203="<<lift203
         <<" lift1000="<<lift1000<<" liftDark="<<liftDark<<std::endl;
     ring.drainQueue();presenter.close();output={};graph.shutdown();av_frame_free(&frame);

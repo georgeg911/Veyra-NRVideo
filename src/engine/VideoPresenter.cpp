@@ -539,7 +539,14 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         // would barely compress anything the frame actually contains). The hard
         // ceiling itself (dims[13]) stays the user's: it also anchors the mid-gray
         // gamma, so moving it would reshape the whole tone scale.
-        float peak=effective.peakCapNits?float(effective.peakCapNits):1000.0f;
+        // Custom (完整 B): when the user set no hard ceiling, close the roll-off at
+        // the expansion's own target instead of the 1000-nit fallback. With a display
+        // peak of 1500-2000 the expansion lifts the highlight, then a 1000-nit
+        // closing point compressed it straight back - the feature looked enabled and
+        // did nothing. A stated peakCapNits still wins, so the other paths are
+        // untouched.
+        float peak=effective.peakCapNits?float(effective.peakCapNits)
+                                       :(doviExpansionActive?float(doviCeilingNits):1000.0f);
         const float start=float(effective.highlightStartNits);
         if(followDovi){
             float framePeak=float(engine::pqToNits(latestDovi_.maxPq));
