@@ -618,69 +618,6 @@ VPage {
                                 VButton { objectName: "set-shotdir"; text: qsTr("更改…"); onClicked: veyra.chooseScreenshotDirectory() }
                             }
                         }
-                    // Bilibili overlays. Both default off: they only apply to Bilibili
-                    // videos, and each one costs a network request when it is on.
-                    VGroup {
-                        objectName: "set-bili-overlays"
-                        VRow {
-                            label: qsTr("B 站弹幕")
-                            hint: qsTr("播放 B 站视频时加载该视频的弹幕；其他片源不受影响")
-                            VSwitch {
-                                objectName: "set-bili-danmaku"
-                                checked: veyra.preferences.biliDanmaku === true
-                                onToggled: checked => veyra.setPreference("biliDanmaku", checked)
-                            }
-                        }
-                        VRow {
-                            label: qsTr("弹幕字号")
-                            hint: qsTr("弹幕文字相对默认大小的比例")
-                            VSeg {
-                                objectName: "set-bili-danmaku-scale"
-                                options: [{ id: "75", label: qsTr("小") }, { id: "100", label: qsTr("中") }, { id: "125", label: qsTr("大") }]
-                                current: String(veyra.preferences.danmakuScale === undefined ? 100 : veyra.preferences.danmakuScale)
-                                onPicked: id => veyra.setPreference("danmakuScale", Number(id))
-                            }
-                        }
-                        VRow {
-                            label: qsTr("弹幕不透明度")
-                            hint: qsTr("越高越显眼")
-                            VSeg {
-                                objectName: "set-bili-danmaku-opacity"
-                                options: [{ id: "50", label: qsTr("淡") }, { id: "80", label: qsTr("中") }, { id: "100", label: qsTr("浓") }]
-                                current: String(veyra.preferences.danmakuOpacity === undefined ? 80 : veyra.preferences.danmakuOpacity)
-                                onPicked: id => veyra.setPreference("danmakuOpacity", Number(id))
-                            }
-                        }
-                        VRow {
-                            label: qsTr("弹幕速度")
-                            hint: qsTr("弹幕横向移动的快慢")
-                            VSeg {
-                                objectName: "set-bili-danmaku-speed"
-                                options: [{ id: "70", label: qsTr("慢") }, { id: "100", label: qsTr("正常") }, { id: "140", label: qsTr("快") }]
-                                current: String(veyra.preferences.danmakuSpeed === undefined ? 100 : veyra.preferences.danmakuSpeed)
-                                onPicked: id => veyra.setPreference("danmakuSpeed", Number(id))
-                            }
-                        }
-                        VRow {
-                            label: qsTr("弹幕显示区域")
-                            hint: qsTr("弹幕可以覆盖的画面高度比例；下半部分留给字幕和画面")
-                            VSeg {
-                                objectName: "set-bili-danmaku-area"
-                                options: [{ id: "30", label: qsTr("上 30%") }, { id: "50", label: qsTr("上 50%") }, { id: "80", label: qsTr("上 80%") }]
-                                current: String(veyra.preferences.danmakuArea === undefined ? 50 : veyra.preferences.danmakuArea)
-                                onPicked: id => veyra.setPreference("danmakuArea", Number(id))
-                            }
-                        }
-                        VRow {
-                            label: qsTr("B 站字幕")
-                            hint: qsTr("自动加载视频自带的 CC 字幕，并按网页版样式（白字、半透明底色）显示；没有字幕时不提示")
-                            VSwitch {
-                                objectName: "set-bili-subtitles"
-                                checked: veyra.preferences.biliSubtitles === true
-                                onToggled: checked => veyra.setPreference("biliSubtitles", checked)
-                            }
-                        }
-                    }
                     VGroup {
                         objectName: "set-recording"
                         VRow {
@@ -889,6 +826,69 @@ VPage {
                             font.pixelSize: 12
                             wrapMode: Text.WordWrap
                             lineHeight: 1.3
+                        }
+                    }
+                    // Bilibili overlays. Both default off: they only apply to Bilibili
+                    // videos, and each one costs a network request when it is on.
+                    VGroup {
+                        objectName: "set-bili-overlays"
+                        VRow {
+                            label: qsTr("B 站弹幕")
+                            hint: qsTr("播放 B 站视频时加载该视频的弹幕；其他片源不受影响")
+                            VSwitch {
+                                objectName: "set-bili-danmaku"
+                                checked: veyra.preferences.biliDanmaku === true
+                                onToggled: checked => veyra.setPreference("biliDanmaku", checked)
+                            }
+                        }
+                        VRow {
+                            label: qsTr("弹幕字号")
+                            hint: qsTr("弹幕文字相对默认大小的比例")
+                            VSeg {
+                                objectName: "set-bili-danmaku-scale"
+                                options: [{ id: "75", label: qsTr("小") }, { id: "100", label: qsTr("中") }, { id: "125", label: qsTr("大") }]
+                                current: String(veyra.preferences.danmakuScale === undefined ? 100 : veyra.preferences.danmakuScale)
+                                onPicked: id => veyra.setPreference("danmakuScale", Number(id))
+                            }
+                        }
+                        VRow {
+                            label: qsTr("弹幕不透明度")
+                            hint: qsTr("越高越显眼")
+                            VSeg {
+                                objectName: "set-bili-danmaku-opacity"
+                                options: [{ id: "50", label: qsTr("淡") }, { id: "80", label: qsTr("中") }, { id: "100", label: qsTr("浓") }]
+                                current: String(veyra.preferences.danmakuOpacity === undefined ? 80 : veyra.preferences.danmakuOpacity)
+                                onPicked: id => veyra.setPreference("danmakuOpacity", Number(id))
+                            }
+                        }
+                        VRow {
+                            label: qsTr("弹幕速度")
+                            hint: qsTr("弹幕横向移动的快慢")
+                            VSeg {
+                                objectName: "set-bili-danmaku-speed"
+                                options: [{ id: "70", label: qsTr("慢") }, { id: "100", label: qsTr("正常") }, { id: "140", label: qsTr("快") }]
+                                current: String(veyra.preferences.danmakuSpeed === undefined ? 100 : veyra.preferences.danmakuSpeed)
+                                onPicked: id => veyra.setPreference("danmakuSpeed", Number(id))
+                            }
+                        }
+                        VRow {
+                            label: qsTr("弹幕显示区域")
+                            hint: qsTr("弹幕可以覆盖的画面高度比例；下半部分留给字幕和画面")
+                            VSeg {
+                                objectName: "set-bili-danmaku-area"
+                                options: [{ id: "30", label: qsTr("上 30%") }, { id: "50", label: qsTr("上 50%") }, { id: "80", label: qsTr("上 80%") }]
+                                current: String(veyra.preferences.danmakuArea === undefined ? 50 : veyra.preferences.danmakuArea)
+                                onPicked: id => veyra.setPreference("danmakuArea", Number(id))
+                            }
+                        }
+                        VRow {
+                            label: qsTr("B 站字幕")
+                            hint: qsTr("自动加载视频自带的 CC 字幕，并按网页版样式（白字、半透明底色）显示；没有字幕时不提示")
+                            VSwitch {
+                                objectName: "set-bili-subtitles"
+                                checked: veyra.preferences.biliSubtitles === true
+                                onToggled: checked => veyra.setPreference("biliSubtitles", checked)
+                            }
                         }
                     }
                 }
