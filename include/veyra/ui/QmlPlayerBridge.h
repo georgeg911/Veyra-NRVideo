@@ -41,6 +41,8 @@ namespace veyra::ui {
 
 class MoonlightModel;
 class XboxModel;
+// Defined in QmlPlayerBridge_p.h; only referenced by reference here.
+struct BilibiliBundle;
 
 class QmlPlayerBridge : public QObject {
     Q_OBJECT
@@ -1621,6 +1623,11 @@ private:
     // Local custom build: collects the Bilibili page->stream worker result and
     // opens the CDN address with its Referer/UA and DASH audio.
     void tickBilibiliResolve();
+    // Danmaku and CC subtitles for the part the resolve just opened.
+    void applyBilibiliExtras(const BilibiliBundle& bundle);
+    void installBiliSubtitle(const BilibiliBundle& bundle);
+    // One danmaku frame from the poll loop.
+    void tickDanmaku();
     void tickCapture();
     void tickPs5();
     void tickPs5Control(bool force = false);

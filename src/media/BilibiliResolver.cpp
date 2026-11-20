@@ -5,9 +5,9 @@
 #include "veyra/media/BilibiliResolver.h"
 #include "veyra/media/BiliJson.h"
 #include "veyra/Log.h"
+#include "BilibiliHttp.h"
 #include <windows.h>
 #include <wincrypt.h>   // CryptProtectData: the session cookie is stored encrypted
-#include <winhttp.h>
 #include <regex>
 #include <string>
 #include <format>
@@ -15,86 +15,14 @@
 #pragma comment(lib, "winhttp.lib")
 
 namespace veyra::media {
+
+// The HTTP plumbing is shared with the danmaku/subtitle module.
+using bili::fromUtf8;
+using bili::httpFollowLocation;
+using bili::httpGet;
+using bili::toUtf8;
+
 namespace {
-
-std::string toUtf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(size_t(n > 0 ? n : 0), '\0');
-    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), out.data(), n, nullptr, nullptr);
-    return out;
-}
-
-std::wstring fromUtf8(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), nullptr, 0);
-    std::wstring out(size_t(n > 0 ? n : 0), L'\0');
-    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), out.data(), n);
-    return out;
-}
-
-// One HTTPS GET. Bilibili's API answers with UTF-8 JSON.
-// `cookie` is sent as the Cookie header; empty means an anonymous request.
-bool httpGet(const std::wstring& host, const std::wstring& path, const std::wstring& referer,
-             const std::wstring& cookie, std::string& body, std::wstring& error) {
-    HINTERNET session = WinHttpOpen(L"Veyra/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) { error = L"WinHttpOpen 失败"; return false; }
-    WinHttpSetTimeouts(session, 10000, 10000, 10000, 10000);
-
-    bool ok = false;
-    HINTERNET connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (connect) {
-        HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr,
-                                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                               WINHTTP_FLAG_SECURE);
-        if (request) {
-            const std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                    L"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-            WinHttpAddRequestHeaders(request, (L"User-Agent: " + ua).c_str(), -1L,
-                                     WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-            if (!referer.empty())
-                WinHttpAddRequestHeaders(request, (L"Referer: " + referer).c_str(), -1L,
-                                         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-            // The user's own session: member renditions are only served to it.
-            if (!cookie.empty())
-                WinHttpAddRequestHeaders(request, (L"Cookie: " + cookie).c_str(), -1L,
-                                         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-            if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-                WinHttpReceiveResponse(request, nullptr)) {
-                DWORD status = 0, len = sizeof(status);
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
-                if (status == 200) {
-                    DWORD available = 0;
-                    do {
-                        available = 0;
-                        if (!WinHttpQueryDataAvailable(request, &available)) break;
-                        if (available == 0) break;
-                        std::string chunk(available, '\0');
-                        DWORD read = 0;
-                        if (!WinHttpReadData(request, chunk.data(), available, &read)) break;
-                        body.append(chunk.data(), read);
-                    } while (available > 0);
-                    ok = true;
-                } else {
-                    error = std::format(L"HTTP {}", status);
-                }
-            } else {
-                error = L"请求失败";
-            }
-            WinHttpCloseHandle(request);
-        } else {
-            error = L"WinHttpOpenRequest 失败";
-        }
-        WinHttpCloseHandle(connect);
-    } else {
-        error = L"WinHttpConnect 失败";
-    }
-    WinHttpCloseHandle(session);
-    return ok;
-}
 
 // The DASH manifest carries one object per rendition under "video"/"audio".
 // The parsed document is handed back rather than raw substrings so callers can
@@ -121,57 +49,6 @@ std::wstring apiFailure(const wchar_t* what, long long code) {
 }
 
 } // namespace
-
-// One HTTPS GET that reports where a redirect points instead of a body. b23.tv links
-// (the form the phone app shares) answer 302 with the real video URL in Location.
-bool httpFollowLocation(const std::wstring& host, const std::wstring& path,
-                        std::wstring& location, std::wstring& error) {
-    HINTERNET session = WinHttpOpen(L"Veyra/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) { error = L"WinHttpOpen 失败"; return false; }
-    WinHttpSetTimeouts(session, 10000, 10000, 10000, 10000);
-    bool ok = false;
-    HINTERNET connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (connect) {
-        HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr,
-                                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                               WINHTTP_FLAG_SECURE);
-        if (request) {
-            const std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                    L"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-            WinHttpAddRequestHeaders(request, (L"User-Agent: " + ua).c_str(), -1L,
-                                     WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-            if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-                WinHttpReceiveResponse(request, nullptr)) {
-                DWORD size = 0;
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
-                                    nullptr, &size, WINHTTP_NO_HEADER_INDEX);
-                if (size > sizeof(wchar_t)) {
-                    std::wstring value(size / sizeof(wchar_t) + 1, L'\0');
-                    if (WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION,
-                                            WINHTTP_HEADER_NAME_BY_INDEX, value.data(), &size,
-                                            WINHTTP_NO_HEADER_INDEX)) {
-                        value.resize(wcslen(value.c_str()));
-                        location = value;
-                        ok = !location.empty();
-                    }
-                }
-                if (!ok) error = L"短链没有返回跳转地址";
-            } else {
-                error = L"请求失败";
-            }
-            WinHttpCloseHandle(request);
-        } else {
-            error = L"WinHttpOpenRequest 失败";
-        }
-        WinHttpCloseHandle(connect);
-    } else {
-        error = L"WinHttpConnect 失败";
-    }
-    WinHttpCloseHandle(session);
-    return ok;
-}
 
 // b23.tv/<code> carries no BV id: the redirect holds the real page URL.
 std::wstring expandShortLink(const std::wstring& url, std::wstring& error) {
@@ -329,6 +206,10 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     }
     const std::string cidText = std::to_string(cid);
     result.title = fromUtf8(viewRoot["data"]["title"].asString());
+    // The extras module needs both: danmaku is keyed on cid, the CC subtitle list
+    // on aid+cid. The view answer is authoritative for aid in either URL form.
+    result.aid = viewRoot["data"]["aid"].asInt(0);
+    result.cid = cid;
 
     // 2. Ask for the DASH manifest. fnval 4048 = DASH | HDR | 4K | Dolby audio |
     //    Dolby Vision | 8K | AV1; fourk=1 keeps 4K in the answer.

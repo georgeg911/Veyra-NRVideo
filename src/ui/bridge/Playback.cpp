@@ -1,6 +1,8 @@
 // QML bridge: Playback responsibilities.
 #include "../QmlPlayerBridge_p.h"
 
+#include <algorithm>
+#include <cmath>
 #include <regex>
 #include "veyra/pipeline/NrReuse.h"
 
@@ -292,11 +294,33 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         impl_->biliResolveSignedIn = media::bilibiliCookieLooksSignedIn(cookie);
         impl_->biliResolveBusy = true;
         impl_->biliResolveGen = impl_->liveOpenGen;
-        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {})",
-            impl_->biliResolveSignedIn ? "signed in" : "absent", quality));
-        impl_->biliResolve = std::async(std::launch::async, [page, cookie, quality] {
-            try { return media::resolveBilibiliStream(page, cookie, quality); }
-            catch (...) { media::BilibiliStream r; r.error = L"Bilibili resolution failed"; return r; }
+        const bool wantDanmaku = impl_->prefBool("biliDanmaku", false);
+        const bool wantSubtitles = impl_->prefBool("biliSubtitles", false) && !cookie.empty();
+        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {}, danmaku: {}, subtitles: {})",
+            impl_->biliResolveSignedIn ? "signed in" : "absent", quality, wantDanmaku, wantSubtitles));
+        // The two overlay switches are read once, here: the same worker pass that
+        // resolves the page also fetches the comment track and the CC subtitles for
+        // the part it resolved, so the player never shows a video first and then
+        // starts a second round-trip for its overlays.
+        impl_->biliResolve = std::async(std::launch::async,
+            [page, cookie, quality, wantDanmaku, wantSubtitles] {
+            BilibiliBundle bundle;
+            try { bundle.stream = media::resolveBilibiliStream(page, cookie, quality); }
+            catch (...) { bundle.stream.error = L"Bilibili resolution failed"; return bundle; }
+            if (!bundle.stream.ok) return bundle;
+            bundle.wantDanmaku = wantDanmaku;
+            bundle.wantSubtitles = wantSubtitles;
+            std::wstring error;
+            if (wantDanmaku && !media::fetchBiliDanmaku(bundle.stream.cid, bundle.danmaku, error))
+                bundle.extrasError = L"弹幕：" + error;
+            error.clear();
+            if (wantSubtitles &&
+                !media::fetchBiliSubtitle(bundle.stream.aid, bundle.stream.cid, cookie,
+                                          bundle.cues, bundle.subtitleStyle,
+                                          bundle.subtitleLanguage, error))
+                bundle.extrasError += std::wstring(bundle.extrasError.empty() ? L"" : L"；") +
+                                      L"字幕：" + error;
+            return bundle;
         });
         emit notice(tr("正在解析 B 站链接…"), false);
         return true;
@@ -325,8 +349,9 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
 void QmlPlayerBridge::tickBilibiliResolve() {
     if (!impl_->biliResolveBusy) return;
     if (impl_->biliResolve.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
-    const media::BilibiliStream stream = impl_->biliResolve.get();
+    const BilibiliBundle bundle = impl_->biliResolve.get();
     impl_->biliResolveBusy = false;
+    const media::BilibiliStream& stream = bundle.stream;
     if (impl_->biliResolveGen != impl_->liveOpenGen) {
         // Two API round-trips take a second or two; if the user opened anything
         // else meanwhile, that is what they want to watch.
@@ -358,6 +383,156 @@ void QmlPlayerBridge::tickBilibiliResolve() {
     if (!impl_->biliResolveSignedIn) info += tr("（未登录，画质受限）");
     emit notice(tr("正在播放：%1  %2").arg(QString::fromStdWString(stream.title), info), false);
     openPath(QString::fromStdWString(stream.url));
+    // The overlays go on after the open: openPath() replaces the subtitle tracks,
+    // so installing the site's CC track before it would be thrown away.
+    applyBilibiliExtras(bundle);
+}
+
+// Danmaku and CC subtitles for the part that just opened. A failed request stays
+// silent by design: the video plays either way, and the user asked for these
+// overlays, not for error dialogs about them.
+void QmlPlayerBridge::applyBilibiliExtras(const BilibiliBundle& bundle) {
+    if (!bundle.extrasError.empty())
+        veyra::log::warn("bilibili", QString::fromStdWString(bundle.extrasError).toStdString());
+
+    // Danmaku: build the overlay on first use, then just replace its script.
+    if (bundle.wantDanmaku && !bundle.danmaku.empty()) {
+        if (!impl_->danmakuWindow) impl_->danmakuWindow = std::make_unique<media::DanmakuWindow>();
+        HWND video = impl_->videoWindow;
+        if (video && impl_->danmakuWindow->valid() == false) {
+            if (!impl_->danmakuWindow->create(video)) {
+                veyra::log::warn("danmaku", "overlay creation failed");
+                impl_->danmakuWindow.reset();
+            }
+        }
+        if (impl_->danmakuWindow) {
+            std::vector<media::DanmakuItem> items;
+            items.reserve(bundle.danmaku.size());
+            for (const auto& one : bundle.danmaku) {
+                media::DanmakuItem item;
+                item.time = one.time;
+                item.mode = one.mode;
+                item.color = one.color;
+                item.text = one.text;
+                items.push_back(std::move(item));
+            }
+            veyra::log::info("danmaku", std::format("loaded items={}", items.size()));
+            impl_->danmakuWindow->setItems(std::move(items));
+            impl_->danmakuEnabled = true;
+            impl_->danmakuLastSeconds = -1.0;
+        }
+    } else if (impl_->danmakuWindow) {
+        impl_->danmakuWindow->clearItems();
+        impl_->danmakuWindow->hide();
+        impl_->danmakuEnabled = false;
+    }
+
+    if (bundle.wantSubtitles && !bundle.cues.empty()) {
+        // The site's own display parameters, kept as the user asked; the styles are
+        // applied through the track's SubtitleStyle the same way an ASS file would.
+        installBiliSubtitle(bundle);
+    }
+}
+
+// Installs the site's CC track as an external subtitle track. The subtitles are
+// written as SRT and handed to the existing loader rather than built in memory:
+// the engine's parser owns global state and must run on this thread, and going
+// through the loader keeps language detection, indexing and the offset UI working.
+void QmlPlayerBridge::installBiliSubtitle(const BilibiliBundle& bundle) {
+    auto& i = *impl_;
+    auto stamp = [](double seconds) {
+        const long long ms = std::llround(seconds * 1000.0);
+        return QStringLiteral("%1:%2:%3,%4")
+            .arg(ms / 3600000, 2, 10, QLatin1Char('0'))
+            .arg((ms / 60000) % 60, 2, 10, QLatin1Char('0'))
+            .arg((ms / 1000) % 60, 2, 10, QLatin1Char('0'))
+            .arg(ms % 1000, 3, 10, QLatin1Char('0'));
+    };
+    QString srt;
+    for (size_t k = 0; k < bundle.cues.size(); ++k)
+        srt += QStringLiteral("%1\n%2 --> %3\n%4\n\n")
+                   .arg(k + 1).arg(stamp(bundle.cues[k].from), stamp(bundle.cues[k].to))
+                   .arg(QString::fromStdWString(bundle.cues[k].content));
+
+    const QString dir = QDir(QString::fromStdWString(i.dataDir.wstring())).filePath(QStringLiteral("subs"));
+    QDir().mkpath(dir);
+    const QString path = QDir(dir).filePath(QStringLiteral("bili-%1.srt").arg(bundle.stream.cid));
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        veyra::log::warn("subtitle", "bilibili subtitle: cannot write the SRT file");
+        return;
+    }
+    file.write(srt.toUtf8());
+    file.close();
+
+    engine::SubtitleTrack track = engine::loadSubtitleFile(path.toStdWString());
+    if (!track.usable()) {
+        veyra::log::warn("subtitle", "bilibili subtitle: the SRT did not parse");
+        return;
+    }
+    track.name = L"B 站字幕";
+    track.language = bundle.subtitleLanguage;
+
+    // The site's own display parameters, kept as asked. Only the fields the
+    // existing style actually carries are mapped: colour, background+alpha,
+    // alignment and whether there is an outline.
+    const auto& bcc = bundle.subtitleStyle;
+    if (bcc.present) {
+        auto rgb = [](const std::wstring& hex, uint32_t fallback) -> uint32_t {
+            if (hex.size() >= 7 && hex[0] == L'#') {
+                unsigned v = 0;
+                if (swscanf_s(hex.c_str() + 1, L"%06x", &v) == 1) return 0xFF000000u | (v & 0xFFFFFFu);
+            }
+            return fallback;
+        };
+        const uint32_t background = rgb(bcc.backgroundColor, 0x00000000u) & 0xFFFFFFu;
+        const uint32_t alpha = uint32_t(std::clamp(bcc.backgroundAlpha, 0.0, 1.0) * 255.0 + 0.5);
+        engine::SubtitleStyle style = track.styles.empty() ? engine::SubtitleStyle{} : track.styles.front();
+        style.primary = rgb(bcc.fontColor, 0xFFFFFFFFu);
+        style.back = (alpha << 24) | background;
+        style.background = alpha > 0;
+        style.alignment = (bcc.location >= 1 && bcc.location <= 9) ? bcc.location : 2;
+        if (!bcc.stroke.empty() && bcc.stroke != L"none") style.outlineWidth = std::max(style.outlineWidth, 1.0);
+        if (track.styles.empty()) track.styles.push_back(style);
+        else track.styles.front() = style;
+    }
+
+    i.subTracks.insert(i.subTracks.begin(), std::move(track));
+    ++i.subExternal;
+    i.subPrimary = 0;
+    i.subPrimaryChosen = true;   // the user asked for this track by switching it on
+    i.subStatus = tr("B 站字幕（%1）").arg(QString::fromStdWString(bundle.subtitleLanguage));
+    veyra::log::info("subtitle", std::format("bilibili subtitle installed lan={} cues={}",
+        QString::fromStdWString(bundle.subtitleLanguage).toStdString(), bundle.cues.size()));
+    emit subtitlesChanged();
+}
+
+// Renders one danmaku frame. Called from the poll loop while a video plays.
+void QmlPlayerBridge::tickDanmaku() {
+    auto& i = *impl_;
+    if (!i.danmakuEnabled || !i.danmakuWindow) return;
+    const auto& s = i.snapshot;
+    if (!s.running || s.image || s.capture || s.duration <= 0) {
+        i.danmakuWindow->hide();
+        return;
+    }
+    HWND video = i.videoWindow;
+    if (!video) { i.danmakuWindow->hide(); return; }
+    // A jump means the user seeked: the tracks must be rebuilt or comments would
+    // arrive from where the old position left them.
+    if (i.danmakuLastSeconds >= 0 &&
+        (s.position < i.danmakuLastSeconds - 0.5 || s.position > i.danmakuLastSeconds + 2.0))
+        i.danmakuWindow->noteSeek();
+    i.danmakuLastSeconds = s.position;
+    i.danmakuWindow->follow(video);
+    media::DanmakuView view;
+    view.scale = double(i.prefInt("danmakuScale", 100)) / 100.0;
+    view.opacity = double(i.prefInt("danmakuOpacity", 80)) / 100.0;
+    view.speedFactor = double(i.prefInt("danmakuSpeed", 100)) / 100.0;
+    view.area = double(i.prefInt("danmakuArea", 50)) / 100.0;
+    view.videoWidth = int(s.sourceWidth);
+    view.videoHeight = int(s.sourceHeight);
+    i.danmakuWindow->render(s.position, view);
 }
 
 void QmlPlayerBridge::bringToFront() {

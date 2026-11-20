@@ -29,6 +29,11 @@ struct BilibiliStream {
     // sent twice and the CDN rejects the request.
     std::wstring userAgent;
     std::wstring title;      // page title, for the UI
+    // Identifiers of the part that was resolved. The danmaku track is keyed on cid
+    // and the CC subtitle list on aid+cid, so carrying them here saves the extras
+    // module a second view request.
+    long long aid = 0;
+    long long cid = 0;
     std::wstring error;      // human-readable reason when ok == false
     unsigned width = 0;
     unsigned height = 0;

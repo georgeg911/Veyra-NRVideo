@@ -647,6 +647,9 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     # integration (#172) removed the browse UI, not the resolver.
     src/media/BilibiliResolver.cpp
     src/media/BiliJson.cpp
+    # Danmaku and CC subtitles for the same resolved part.
+    src/media/BilibiliHttp.cpp
+    src/media/BilibiliExtras.cpp
   )
   veyra_apply_warnings(veyra_media)
   # FFmpeg headers are third-party; /WX stays off for this target
@@ -693,6 +696,12 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     tools/media_probe/main.cpp
     tools/nr_harness/harness_util.cpp
   )
+  # Diagnostic probe for the Bilibili danmaku/subtitle endpoints (custom build).
+  add_executable(bili_extras_probe tools/bili_extras_probe/main.cpp)
+  target_compile_options(bili_extras_probe PRIVATE /WX-)
+  target_compile_features(bili_extras_probe PRIVATE cxx_std_20)
+  target_compile_definitions(bili_extras_probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(bili_extras_probe PRIVATE veyra_media)
   veyra_apply_warnings(veyra_media_probe)
   target_compile_options(veyra_media_probe PRIVATE /WX-)
   target_compile_features(veyra_media_probe PRIVATE cxx_std_20)
@@ -1269,6 +1278,10 @@ if(VEYRA_BUILD_QML_UI AND Qt6_FOUND)
     include/veyra/ui/QmlPlayerBridge.h include/veyra/ui/ThumbnailProvider.h
     # Custom: the start-up format badge, same layered-window construction.
     src/media/FormatBadgeWindow.cpp
+    # Custom (B 站弹幕): the danmaku engine is Qt-free; the window wraps it for the
+    # player exactly like SubtitleOverlay does for subtitles.
+    src/media/DanmakuOverlay.cpp
+    src/media/DanmakuWindow.cpp
     # P4-c: the existing subtitle renderer, reused as-is (no second renderer).
     apps/veyra/ui/SubtitleOverlay.cpp)
   set_source_files_properties(apps/veyra/ui/SubtitleOverlay.cpp PROPERTIES COMPILE_OPTIONS /utf-8)

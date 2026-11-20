@@ -30,6 +30,7 @@ public:
     // Typed accessors. They return the fallback when the value has another type,
     // so callers can chain them without checking every level by hand.
     long long asInt(long long fallback = 0) const;
+    double asDouble(double fallback = 0.0) const;
     const std::string& asString() const;
 
     // Object member lookup. A missing key yields a shared null value, so

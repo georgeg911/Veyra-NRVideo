@@ -57,6 +57,18 @@ long long Value::asInt(long long fallback) const {
     return fallback;
 }
 
+double Value::asDouble(double fallback) const {
+    if (type_ == Type::Number) return number_;
+    if (type_ == Type::String && !string_.empty()) {
+        try {
+            return std::stod(string_);
+        } catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
 const std::string& Value::asString() const {
     static const std::string empty;
     return type_ == Type::String ? string_ : empty;

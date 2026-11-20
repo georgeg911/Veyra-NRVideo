@@ -7,6 +7,8 @@
 #include "veyra/gfx/NvidiaVrr.h"
 #include "veyra/media/NetworkInput.h"
 #include "veyra/media/BilibiliResolver.h"
+#include "veyra/media/BilibiliExtras.h"
+#include "veyra/media/DanmakuWindow.h"
 #include "veyra/media/FormatBadgeWindow.h"
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/RuntimePaths.h"
@@ -202,6 +204,20 @@ struct DisplayChangeFilter final : QAbstractNativeEventFilter {
 };
 } // namespace bridge_detail
 
+// One Bilibili open, resolved on a worker thread: the stream plus whatever the
+// danmaku and subtitle switches asked for. A failed extras request never fails the
+// open - the video plays without the overlay, which is what "silently skip" means.
+struct BilibiliBundle {
+    media::BilibiliStream stream;
+    std::vector<media::BiliDanmaku> danmaku;
+    std::vector<media::BiliSubtitleCue> cues;
+    media::BiliSubtitleStyle subtitleStyle;
+    std::wstring subtitleLanguage;
+    bool wantDanmaku = false;
+    bool wantSubtitles = false;
+    std::wstring extrasError;   // diagnostics only; never shown as a notice
+};
+
 struct QmlPlayerBridge::Impl {
     // Per-layer on/off before the NR master switch turned them all off.
     std::vector<bool> nrMasterRestore;
@@ -313,7 +329,10 @@ struct QmlPlayerBridge::Impl {
     // CDN address, the site's Referer/User-Agent and a separate DASH audio
     // address first. The API round-trips take a second or two, so the work runs
     // on a worker thread and tickBilibiliResolve() picks the result up.
-    std::future<media::BilibiliStream> biliResolve;
+    //
+    // The danmaku track and the CC subtitle list hang off the same part, so they
+    // are fetched in the same worker pass and applied when the result lands.
+    std::future<BilibiliBundle> biliResolve;
     bool biliResolveBusy = false;
     bool biliResolveSignedIn = false;
     // liveOpenGen at the moment the resolve started. Open-path bumps liveOpenGen
@@ -327,6 +346,12 @@ struct QmlPlayerBridge::Impl {
     // Set between "stream resolved" and the resulting openPath(): openPath must
     // keep the DASH audio address and the request headers for this one open.
     bool bilibiliOpenPending = false;
+    // --- Bilibili danmaku (local custom build) -----------------------------
+    // The engine is Qt-free and lives in veyra_qml_bridge beside SubtitleOverlay.
+    // Created on first use; shown only while a video is actually playing.
+    std::unique_ptr<media::DanmakuWindow> danmakuWindow;
+    bool danmakuEnabled = false;
+    double danmakuLastSeconds = -1.0;   // seek detection, like the subtitle overlay
 
     // The export job manager is the real thing: state, progress and encoded
     // counts come from its snapshot.
