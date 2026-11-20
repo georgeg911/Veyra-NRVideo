@@ -145,6 +145,25 @@ void QmlPlayerBridge::tickSubtitles() {
     std::vector<SubtitleLine> draw;
     const bool show = i.prefBool("subtitleEnabled", true) && (s.running && !s.image && !s.capture) && !i.subTracks.empty();
     if (show) {
+        // 设置 → 播放 → 字幕配色. Read once per tick and applied to plain-text
+        // tracks; ASS/SSA is drawn by libass from the file's own styles and never
+        // reaches this branch. Bilibili CC starts out with the site's BCC colours
+        // and is overridden here when the user picked their own.
+        const QString userText = i.prefString("subtitleColor");
+        const QString userBack = i.prefString("subtitleBackColor");
+        const int userBackAlpha = i.prefInt("subtitleBackAlpha", 70);
+        const auto parseRgb = [](const QString& value, uint32_t& out) {
+            if (!value.startsWith(QLatin1Char('#'))) return false;
+            bool ok = false;
+            const uint32_t rgb = value.mid(1).toUInt(&ok, 16);
+            if (!ok) return false;
+            out = 0xFF000000u | (rgb & 0xFFFFFFu);
+            return true;
+        };
+        uint32_t textColour = 0, backColour = 0;
+        const bool hasTextColour = parseRgb(userText, textColour);
+        const bool hasBackColour = parseRgb(userBack, backColour);
+        const uint32_t backAlpha = uint32_t(std::clamp(userBackAlpha, 0, 100)) * 255u / 100u;
         auto append = [&](int index, bool secondary) {
             if (index < 0 || size_t(index) >= i.subTracks.size()) return;
             const auto& track = i.subTracks[size_t(index)];
@@ -167,6 +186,13 @@ void QmlPlayerBridge::tickSubtitles() {
                 line.style = track.styles.empty() ? engine::SubtitleStyle{}
                            : track.styles[size_t(std::clamp(cue->style, 0, int(track.styles.size()) - 1))];
                 if (cue->alignOverride) line.style.alignment = cue->alignOverride;
+                // The user's own colours win over whatever the track carried:
+                // picking one is an explicit request, unlike the site defaults.
+                if (hasTextColour) line.style.primary = textColour;
+                if (hasBackColour) {
+                    line.style.back = (backAlpha << 24) | (backColour & 0xFFFFFFu);
+                    line.style.background = backAlpha > 0;
+                }
                 line.alignOverride = cue->alignOverride;
                 line.posX = cue->posX >= 0 ? cue->posX / std::max(1.0, track.scriptWidth) : -1.0;
                 line.posY = cue->posY >= 0 ? cue->posY / std::max(1.0, track.scriptHeight) : -1.0;

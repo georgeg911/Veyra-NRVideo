@@ -190,6 +190,8 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
     }
     static const QHash<QString, std::pair<int, int>> ranges{
         {"subtitleSize", {16, 56}}, {"subtitleFont", {0, 5}}, {"subtitleOutline", {0, 3}},
+        // 设置 → 播放 → 字幕配色: background bar opacity in percent.
+        {"subtitleBackAlpha", {0, 100}},
         {"subtitleMargin", {0, 240}}, {"subtitleLines", {0, 8}},
         // 列表模式 parameter panel width (ProPage splitter); QML clamps it to the window.
         {"listInspectorWidth", {376, 4000}},
@@ -245,6 +247,14 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         bool ok = false; const double v = value.toDouble(&ok);
         if (!ok || !(qFuzzyCompare(v, 1.0) || qFuzzyCompare(v, 0.1) || qFuzzyCompare(v, 0.01))) return false;
         stored = v;
+    } else if (key == QLatin1String("subtitleColor") || key == QLatin1String("subtitleBackColor")) {
+        // "#RRGGBB", or empty to follow the track's own colour (ASS styles, BCC).
+        const QString v = value.toString();
+        if (!v.isEmpty() && !(v.size() == 7 && v[0] == QLatin1Char('#'))) return false;
+        stored = v;
+    } else if (key == QLatin1String("subtitlePreset")) {
+        // Which preset is applied; cleared when the user tweaks a colour by hand.
+        stored = value.toString();
     } else if (key == QLatin1String("palette")) {
         // 设置 → 外观 → 界面配色 (Theme.qml): 日落 or the original 经典 palette.
         const QString v = value.toString();

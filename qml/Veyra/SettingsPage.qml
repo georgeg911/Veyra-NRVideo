@@ -26,6 +26,24 @@ VPage {
         // render(true): 480 ms, i*40 ms, y 12).
         Qt.callLater(() => stagger(sectionColumns[section] || null))
     }
+    // 字幕配色预设：主流、清晰、对比够用的五套。手动改字色/底色会把
+    // subtitlePreset 清空，下拉就显示「自定义」。
+    readonly property var subtitlePresets: [
+        { id: "classic", label: qsTr("白字黑边（默认）"), fg: "#FFFFFF", bg: "", alpha: 0 },
+        { id: "blackbar", label: qsTr("白字 + 半透明黑底"), fg: "#FFFFFF", bg: "#000000", alpha: 70 },
+        { id: "cinema", label: qsTr("黄字黑边"), fg: "#FFE14D", bg: "", alpha: 0 },
+        { id: "bili", label: qsTr("白字 + 紫底"), fg: "#FFFFFF", bg: "#9C27B0", alpha: 55 },
+        { id: "paper", label: qsTr("黑字 + 白底"), fg: "#111111", bg: "#FFFFFF", alpha: 88 }
+    ]
+    readonly property var subtitleTextSwatches: ["#FFFFFF", "#FFE14D", "#E8E8EE", "#9BE7A0", "#8FD8FF", "#FFB3C8"]
+    readonly property var subtitleBackSwatches: ["#000000", "#202020", "#9C27B0", "#1B3A5C", "#FFFFFF", "#4A4A4A"]
+    function applySubtitlePreset(p) {
+        veyra.setPreference("subtitleColor", p.fg)
+        veyra.setPreference("subtitleBackColor", p.bg)
+        veyra.setPreference("subtitleBackAlpha", p.alpha)
+        veyra.setPreference("subtitlePreset", p.id)
+    }
+
     readonly property var sectionColumns: ({ look: secLook, window: secWindow, play: secPlay, audio: secAudio, perf: secPerf, compat: secCompat, ps5: secPs5, keys: secKeys, comp: secComp, about: secAbout, sponsor: secSponsor })
     Component { id: staggerComp; VRise.Stagger {} }
     function stagger(col) {
@@ -888,6 +906,81 @@ VPage {
                                 objectName: "set-bili-subtitles"
                                 checked: veyra.preferences.biliSubtitles === true
                                 onToggled: checked => veyra.setPreference("biliSubtitles", checked)
+                            }
+                        }
+                        // 字幕配色：预设覆盖常见且清晰的搭配，色块用于手动微调。
+                        // 对纯文本字幕生效（SRT、B 站 CC）；ASS 保留片源自带样式。
+                        VRow {
+                            label: qsTr("字幕配色")
+                            hint: qsTr("一键套用常见搭配；手动选色后显示为「自定义」")
+                            VSelect {
+                                objectName: "set-subtitle-preset"
+                                implicitWidth: 190
+                                options: [{ id: "", label: qsTr("自定义") }]
+                                    .concat(root.subtitlePresets.map(p => ({ id: p.id, label: p.label })))
+                                value: (options.find(o => o.id === (veyra.preferences.subtitlePreset || "")) || options[0]).label
+                                onPicked: id => {
+                                    const p = root.subtitlePresets.find(x => x.id === id)
+                                    if (p) root.applySubtitlePreset(p)
+                                }
+                            }
+                        }
+                        VRow {
+                            label: qsTr("字体颜色")
+                            hint: qsTr("不选则跟随字幕文件；点色块覆盖")
+                            Row {
+                                spacing: 6
+                                Repeater {
+                                    model: root.subtitleTextSwatches
+                                    delegate: Rectangle {
+                                        required property string modelData
+                                        width: 24; height: 24; radius: 12
+                                        color: modelData
+                                        border.width: (veyra.preferences.subtitleColor || "") === modelData ? 2 : 1
+                                        border.color: (veyra.preferences.subtitleColor || "") === modelData ? Theme.accent : Theme.stroke2
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                veyra.setPreference("subtitleColor", modelData)
+                                                veyra.setPreference("subtitlePreset", "")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        VRow {
+                            label: qsTr("字幕底色")
+                            hint: qsTr("默认不画底色；选了颜色后按下面的透明度绘制")
+                            Row {
+                                spacing: 6
+                                Repeater {
+                                    model: root.subtitleBackSwatches
+                                    delegate: Rectangle {
+                                        required property string modelData
+                                        width: 24; height: 24; radius: 12
+                                        color: modelData
+                                        border.width: (veyra.preferences.subtitleBackColor || "") === modelData ? 2 : 1
+                                        border.color: (veyra.preferences.subtitleBackColor || "") === modelData ? Theme.accent : Theme.stroke2
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                veyra.setPreference("subtitleBackColor", modelData)
+                                                veyra.setPreference("subtitlePreset", "")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        VRow {
+                            label: qsTr("底色透明度")
+                            hint: qsTr("底色越实，字幕在明亮画面上越清楚")
+                            VSeg {
+                                objectName: "set-subtitle-back-alpha"
+                                options: [{ id: "0", label: qsTr("无") }, { id: "45", label: qsTr("淡") }, { id: "70", label: qsTr("中") }, { id: "90", label: qsTr("实") }]
+                                current: String(veyra.preferences.subtitleBackAlpha === undefined ? 70 : veyra.preferences.subtitleBackAlpha)
+                                onPicked: id => veyra.setPreference("subtitleBackAlpha", Number(id))
                             }
                         }
                     }
