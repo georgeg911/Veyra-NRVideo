@@ -201,12 +201,18 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         {"recordFps", {0, 240}},
         {"virtualCameraFps", {0, 120}},
         // Instant replay (#103): seconds the buffer keeps.
-        {"replaySeconds", {15, 600}}};
+        {"replaySeconds", {15, 600}},
+        // Bilibili danmaku look (设置 → 播放 → B 站弹幕). Percentages, so the
+        // QML can stay a three-way choice while the engine keeps a multiplier.
+        {"danmakuScale", {50, 200}}, {"danmakuOpacity", {0, 100}},
+        {"danmakuSpeed", {30, 300}}, {"danmakuArea", {10, 100}}};
     static const QStringList flags{"recordHevc", "recordAudio", "recordMic", "recordMicTrack", "replayEnabled", "subtitleEnabled", "subtitleBackground", "subtitleFit",
                                    "subtitleSecondLanguage", "audioForceStereo", "captureAudioMonitor", "holdCompare",
                                    "magewellLowLatency", "blackmagicNativeCapture", "captureShowAllFrameRates", "cinePillHidden", "exportStopsPlayback", "obsGameCapture", "autoResume", "fullscreenMemoryProtection", "prewarmEnhancement", "hdrFgCompatibility", "computeOnMonitorGpu", "deinterlace", "networkAutoReconnect",
                                    // 设置 → 外观 → 启动动画 / 启动音乐 / 剔除遮罩（2.1.9）
-                                   "introAnimation", "introMusic", "exclusionOverlay"};
+                                   "introAnimation", "introMusic", "exclusionOverlay",
+                                   // 设置 → 播放 → B 站弹幕 / B 站字幕
+                                   "biliDanmaku", "biliSubtitles"};
     QVariant stored;
     if (ranges.contains(key)) {
         bool ok = false; const int n = value.toInt(&ok);
