@@ -209,6 +209,19 @@ void QmlPlayerBridge::openPath(const QString& path) {
     impl_->bilibiliOpenPending = false;
     const QString biliTitle = impl_->pendingBiliTitle;
     impl_->pendingBiliTitle.clear();
+    // Danmaku belongs to the source that loaded it. openPath() runs for every new
+    // source, so a Bilibili comment track would otherwise keep flying over the next
+    // local file (it did: 637 items stayed on screen). The resolved-open path sets
+    // Bilibili stream state first and reloads its own track through
+    // applyBilibiliExtras(), so only non-Bilibili opens clear here.
+    if (!keepBilibiliStream) {
+        if (impl_->danmakuWindow) {
+            impl_->danmakuWindow->clearItems();
+            impl_->danmakuWindow->hide();
+        }
+        impl_->danmakuEnabled = false;
+        impl_->danmakuLastSeconds = -1.0;
+    }
     endExclusionMove(false);
     impl_->exclusionSelected=-1;
     flushHdrMemory();impl_->hdrTitleApplied.clear();
@@ -404,9 +417,8 @@ void QmlPlayerBridge::applyBilibiliExtras(const BilibiliBundle& bundle) {
     // Danmaku: build the overlay on first use, then just replace its script.
     if (bundle.wantDanmaku && !bundle.danmaku.empty()) {
         if (!impl_->danmakuWindow) impl_->danmakuWindow = std::make_unique<media::DanmakuWindow>();
-        HWND video = impl_->videoWindow;
-        if (video && impl_->danmakuWindow->valid() == false) {
-            if (!impl_->danmakuWindow->create(video)) {
+        if (!impl_->danmakuWindow->valid() && impl_->videoWindow) {
+            if (!impl_->danmakuWindow->create(impl_->videoWindow)) {
                 veyra::log::warn("danmaku", "overlay creation failed");
                 impl_->danmakuWindow.reset();
             }
@@ -414,14 +426,10 @@ void QmlPlayerBridge::applyBilibiliExtras(const BilibiliBundle& bundle) {
         if (impl_->danmakuWindow) {
             std::vector<media::DanmakuItem> items;
             items.reserve(bundle.danmaku.size());
-            for (const auto& one : bundle.danmaku) {
-                media::DanmakuItem item;
-                item.time = one.time;
-                item.mode = one.mode;
-                item.color = one.color;
-                item.text = one.text;
-                items.push_back(std::move(item));
-            }
+            // BiliDanmaku and DanmakuItem are the same shape; copy field by field
+            // rather than teaching the engine type about the site's response.
+            for (const auto& one : bundle.danmaku)
+                items.push_back({one.time, one.mode, one.color, one.text});
             veyra::log::info("danmaku", std::format("loaded items={}", items.size()));
             impl_->danmakuWindow->setItems(std::move(items));
             impl_->danmakuEnabled = true;

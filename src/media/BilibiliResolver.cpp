@@ -151,15 +151,16 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
         }
         resolvedUrl = expanded;
     }
+    // One UTF-8 copy of the URL serves the id scan and the ?p= scan.
+    const std::string resolvedUtf8 = toUtf8(resolvedUrl);
     std::string bvid, aid;
     {
-        const std::string utf8 = toUtf8(resolvedUrl);
         std::smatch m;
         const std::regex bvRe(R"((BV[0-9A-Za-z]{10}))");
-        if (std::regex_search(utf8, m, bvRe)) bvid = m[1].str();
+        if (std::regex_search(resolvedUtf8, m, bvRe)) bvid = m[1].str();
         if (bvid.empty()) {
             const std::regex avRe(R"(/av([0-9]+))");
-            if (std::regex_search(utf8, m, avRe)) aid = m[1].str();
+            if (std::regex_search(resolvedUtf8, m, avRe)) aid = m[1].str();
         }
     }
     if (bvid.empty() && aid.empty()) {
@@ -189,17 +190,23 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     if (pages.size() > 0) cid = pages[0]["cid"].asInt(cid);
     // 多 P：URL 的 ?p=N 指定第几 P（1 起），每 P 的 cid 在 data.pages 里。
     // 浏览器插件会把带 ?p= 的页面地址原样传过来，所以这里也要认。
+    // A ?p= past the last part is refused rather than silently playing part 1:
+    // a shared link with a stale part number should say so.
     int pageIndex = 1;
     {
         static const std::regex pRe(R"([?&]p=(\d+))");
         std::smatch pm;
-        const std::string u8 = toUtf8(resolvedUrl);
-        if (std::regex_search(u8, pm, pRe)) {
-            try { pageIndex = std::stoi(pm[1].str()); } catch (...) { pageIndex = 1; }
+        if (std::regex_search(resolvedUtf8, pm, pRe)) {
+            try { pageIndex = std::max(1, std::stoi(pm[1].str())); } catch (...) { pageIndex = 1; }
         }
     }
-    if (pageIndex > 1 && pages.size() >= size_t(pageIndex))
+    if (pageIndex > 1) {
+        if (pages.size() < size_t(pageIndex)) {
+            result.error = std::format(L"视频只有 {} 个分P，没有第 {} 个", pages.size(), pageIndex);
+            return result;
+        }
         cid = pages[size_t(pageIndex - 1)]["cid"].asInt(cid);
+    }
     if (cid <= 0) {
         result.error = L"视频信息里没有 cid";
         return result;
@@ -236,7 +243,7 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     // 3. Pick the highest H.264 rendition: every Windows hardware decoder handles
     //    it, and it avoids the HEVC licensing question entirely.
     const auto& renditions = dashArray(playRoot, "video");
-    if (renditions.size() == 0) {
+    if (renditions.elements().empty()) {
         result.error = L"没有可用的视频流（该视频可能需要登录）";
         return result;
     }
@@ -312,10 +319,8 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
         }
     }
 
-
     result.ok = true;
-    log::info("bilibili", std::format("resolved {} -> video codec={} quality={} audio={}",
-        toUtf8(pageUrl), bestCodec, bestId, result.audioUrl.empty() ? "none" : toUtf8(result.audioCodec)));
+    log::info("bilibili", std::format("resolved {} -> video codec={} quality={} audio={}",        toUtf8(pageUrl), bestCodec, bestId, result.audioUrl.empty() ? "none" : toUtf8(result.audioCodec)));
     return result;
 }
 

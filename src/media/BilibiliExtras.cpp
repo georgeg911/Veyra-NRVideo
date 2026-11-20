@@ -205,6 +205,52 @@ bool languageIs(const std::wstring& lan, const wchar_t* tag) {
     return lan.rfind(tag, 0) == 0;
 }
 
+// The comment track is XML, so a comment containing & or < arrives escaped. Without
+// this the player shows "&amp;" and "&lt;" literally. Only the five predefined
+// entities plus numeric character references occur in practice.
+std::wstring unescapeXml(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '&') { out.push_back(text[i]); continue; }
+        const size_t semi = text.find(';', i + 1);
+        // A '&' with no terminator nearby is literal text, not an entity.
+        if (semi == std::string::npos || semi - i > 10) { out.push_back('&'); continue; }
+        const std::string name = text.substr(i + 1, semi - i - 1);
+        if (name == "amp") out.push_back('&');
+        else if (name == "lt") out.push_back('<');
+        else if (name == "gt") out.push_back('>');
+        else if (name == "quot") out.push_back('"');
+        else if (name == "apos") out.push_back('\'');
+        else if (!name.empty() && name[0] == '#') {
+            // &#123; decimal or &#x1F; hexadecimal.
+            const bool hex = name.size() > 2 && (name[1] == 'x' || name[1] == 'X');
+            const std::string digits = name.substr(hex ? 2 : 1);
+            unsigned code = 0;
+            try { code = unsigned(std::stoul(digits, nullptr, hex ? 16 : 10)); }
+            catch (...) { out += text.substr(i, semi - i + 1); i = semi; continue; }
+            if (code < 0x80) out.push_back(char(code));
+            else if (code < 0x800) {
+                out.push_back(char(0xC0 | (code >> 6)));
+                out.push_back(char(0x80 | (code & 0x3F)));
+            } else if (code < 0x10000) {
+                out.push_back(char(0xE0 | (code >> 12)));
+                out.push_back(char(0x80 | ((code >> 6) & 0x3F)));
+                out.push_back(char(0x80 | (code & 0x3F)));
+            } else {
+                out.push_back(char(0xF0 | (code >> 18)));
+                out.push_back(char(0x80 | ((code >> 12) & 0x3F)));
+                out.push_back(char(0x80 | ((code >> 6) & 0x3F)));
+                out.push_back(char(0x80 | (code & 0x3F)));
+            }
+        } else {
+            out += text.substr(i, semi - i + 1);   // unknown entity, keep as written
+        }
+        i = semi;
+    }
+    return fromUtf8(out);
+}
+
 } // namespace
 
 bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring& error) {
@@ -249,7 +295,7 @@ bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring
                 pos = textEnd + 4;
                 continue;
             }
-            one.text = fromUtf8(body.substr(textStart + 1, textEnd - textStart - 1));
+            one.text = unescapeXml(body.substr(textStart + 1, textEnd - textStart - 1));
             out.push_back(std::move(one));
         }
         pos = textEnd + 4;
