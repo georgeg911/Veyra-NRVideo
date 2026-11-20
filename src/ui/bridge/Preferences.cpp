@@ -255,6 +255,11 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
     } else if (key == QLatin1String("subtitlePreset")) {
         // Which preset is applied; cleared when the user tweaks a colour by hand.
         stored = value.toString();
+    } else if (key == QLatin1String("biliSubtitleLang")) {
+        // Bilibili CC track choice: Chinese, English, or both lines.
+        const QString v = value.toString();
+        if (v != QLatin1String("zh") && v != QLatin1String("en") && v != QLatin1String("both")) return false;
+        stored = v;
     } else if (key == QLatin1String("palette")) {
         // 设置 → 外观 → 界面配色 (Theme.qml): 日落 or the original 经典 palette.
         const QString v = value.toString();

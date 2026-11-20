@@ -47,9 +47,15 @@ bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring
 // unsigned /x/player/v2 answers the list with empty subtitle_url values, which reads
 // as "this video has no subtitles". `cookie` must be the signed-in session.
 //
+// `mode` picks the track: "zh" (Chinese, one line), "en" (English, one line) or
+// "both" (Chinese with the English line merged underneath). A video usually offers
+// only one of the two; asking for a language it does not have falls back to the
+// other rather than showing nothing.
+//
 // A video with no CC track is NOT an error: it returns true with `cues` empty, so the
 // caller can stay silent about it.
 bool fetchBiliSubtitle(long long aid, long long cid, const std::wstring& cookie,
+                       const std::wstring& mode,
                        std::vector<BiliSubtitleCue>& cues, BiliSubtitleStyle& style,
                        std::wstring& language, std::wstring& error);
 

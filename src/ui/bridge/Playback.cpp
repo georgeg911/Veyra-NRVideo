@@ -296,14 +296,19 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         impl_->biliResolveGen = impl_->liveOpenGen;
         const bool wantDanmaku = impl_->prefBool("biliDanmaku", false);
         const bool wantSubtitles = impl_->prefBool("biliSubtitles", false) && !cookie.empty();
-        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {}, danmaku: {}, subtitles: {})",
-            impl_->biliResolveSignedIn ? "signed in" : "absent", quality, wantDanmaku, wantSubtitles));
+        // zh / en / both; the extras fall back to the other language when a video
+        // only carries one of them.
+        const QString langPref = impl_->prefString("biliSubtitleLang");
+        const std::wstring subtitleMode = langPref.isEmpty() ? std::wstring(L"zh") : langPref.toStdWString();
+        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {}, danmaku: {}, subtitles: {}, subtitleMode: {})",
+            impl_->biliResolveSignedIn ? "signed in" : "absent", quality, wantDanmaku, wantSubtitles,
+            langPref.isEmpty() ? std::string("zh") : langPref.toStdString()));
         // The two overlay switches are read once, here: the same worker pass that
         // resolves the page also fetches the comment track and the CC subtitles for
         // the part it resolved, so the player never shows a video first and then
         // starts a second round-trip for its overlays.
         impl_->biliResolve = std::async(std::launch::async,
-            [page, cookie, quality, wantDanmaku, wantSubtitles] {
+            [page, cookie, quality, wantDanmaku, wantSubtitles, subtitleMode] {
             BilibiliBundle bundle;
             try { bundle.stream = media::resolveBilibiliStream(page, cookie, quality); }
             catch (...) { bundle.stream.error = L"Bilibili resolution failed"; return bundle; }
@@ -316,6 +321,7 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
             error.clear();
             if (wantSubtitles &&
                 !media::fetchBiliSubtitle(bundle.stream.aid, bundle.stream.cid, cookie,
+                                          subtitleMode,
                                           bundle.cues, bundle.subtitleStyle,
                                           bundle.subtitleLanguage, error))
                 bundle.extrasError += std::wstring(bundle.extrasError.empty() ? L"" : L"；") +

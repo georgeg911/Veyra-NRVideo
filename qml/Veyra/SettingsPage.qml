@@ -908,6 +908,16 @@ VPage {
                                 onToggled: checked => veyra.setPreference("biliSubtitles", checked)
                             }
                         }
+                        VRow {
+                            label: qsTr("字幕语言")
+                            hint: qsTr("视频同时有中英文字幕时用「双语」；只有一种时自动用那一种")
+                            VSeg {
+                                objectName: "set-bili-subtitle-lang"
+                                options: [{ id: "zh", label: qsTr("中文") }, { id: "en", label: qsTr("英文") }, { id: "both", label: qsTr("双语") }]
+                                current: veyra.preferences.biliSubtitleLang || "zh"
+                                onPicked: id => veyra.setPreference("biliSubtitleLang", id)
+                            }
+                        }
                         // 字幕配色：预设覆盖常见且清晰的搭配，色块用于手动微调。
                         // 对纯文本字幕生效（SRT、B 站 CC）；ASS 保留片源自带样式。
                         VRow {

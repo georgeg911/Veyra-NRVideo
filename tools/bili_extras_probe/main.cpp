@@ -42,19 +42,20 @@ int main(int argc, char** argv) {
                     danmaku.front().text.c_str());
     }
 
-    std::vector<veyra::media::BiliSubtitleCue> cues;
-    veyra::media::BiliSubtitleStyle style;
-    std::wstring language;
-    error.clear();
-    const bool subOk = veyra::media::fetchBiliSubtitle(stream.aid, stream.cid, cookie, cues, style, language, error);
-    std::printf("subtitle: ok=%d count=%zu lang=%ls stylePresent=%d error=%ls\n",
-                int(subOk), cues.size(), language.c_str(), int(style.present), error.c_str());
-    if (subOk && !cues.empty()) {
-        std::printf("  style: fg=%ls bg=%ls alpha=%.2f stroke=%ls loc=%d\n",
-                    style.fontColor.c_str(), style.backgroundColor.c_str(),
-                    style.backgroundAlpha, style.stroke.c_str(), style.location);
-        std::printf("  first: %.2f-%.2f %ls\n", cues.front().from, cues.front().to,
-                    cues.front().content.c_str());
+    for (const wchar_t* mode : {L"zh", L"en", L"both"}) {
+        std::vector<veyra::media::BiliSubtitleCue> cues;
+        veyra::media::BiliSubtitleStyle style;
+        std::wstring language;
+        error.clear();
+        const bool subOk = veyra::media::fetchBiliSubtitle(stream.aid, stream.cid, cookie, mode,
+                                                           cues, style, language, error);
+        std::printf("subtitle[%ls]: ok=%d count=%zu lang=%ls style=%d error=%ls\n",
+                    mode, int(subOk), cues.size(), language.c_str(), int(style.present), error.c_str());
+        if (subOk && !cues.empty()) {
+            std::wstring first = cues.front().content;
+            for (auto& c : first) if (c == L'\n') c = L'|';
+            std::printf("  first: %.2f-%.2f %ls\n", cues.front().from, cues.front().to, first.c_str());
+        }
     }
     return 0;
 }

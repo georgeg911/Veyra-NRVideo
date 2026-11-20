@@ -177,6 +177,34 @@ void readStyle(const json::Value& root, BiliSubtitleStyle& style) {
                     || !style.stroke.empty() || root["font_size"].asDouble(0.0) > 0.0;
 }
 
+// Downloads one track's cues. The display parameters come from whichever track is
+// the primary one; a secondary track only contributes its text.
+bool downloadTrack(const std::wstring& url, const std::wstring& cookie,
+                   std::vector<BiliSubtitleCue>& cues, BiliSubtitleStyle* style,
+                   std::wstring& error) {
+    std::wstring host, path;
+    if (!splitUrl(url, host, path)) { error = L"字幕地址不是 https"; return false; }
+    std::string body;
+    if (!httpGet(host, path, kReferer, cookie, body, error)) return false;
+    const auto root = json::parse(body);
+    if (style) readStyle(root, *style);
+    for (const auto& entry : root["body"].elements()) {
+        BiliSubtitleCue cue;
+        cue.from = (*entry)["from"].asDouble(0.0);
+        cue.to = (*entry)["to"].asDouble(0.0);
+        cue.content = fromUtf8((*entry)["content"].asString());
+        if (cue.to <= cue.from || cue.content.empty()) continue;
+        cues.push_back(std::move(cue));
+    }
+    if (cues.empty()) { error = L"字幕内容为空"; return false; }
+    return true;
+}
+
+// Prefix match on the site's language codes: zh, ai-zh, zh-Hans, en, ai-en...
+bool languageIs(const std::wstring& lan, const wchar_t* tag) {
+    return lan.rfind(tag, 0) == 0;
+}
+
 } // namespace
 
 bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring& error) {
@@ -231,6 +259,7 @@ bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring
 }
 
 bool fetchBiliSubtitle(long long aid, long long cid, const std::wstring& cookie,
+                       const std::wstring& mode,
                        std::vector<BiliSubtitleCue>& cues, BiliSubtitleStyle& style,
                        std::wstring& language, std::wstring& error) {
     cues.clear();
@@ -268,37 +297,69 @@ bool fetchBiliSubtitle(long long aid, long long cid, const std::wstring& cookie,
     // No CC track on this video: not an error, and not worth a notice.
     if (tracks.empty()) return true;
 
-    // 2. Prefer the site's own Chinese track, then the AI one, then whatever is first.
-    auto pick = [&tracks](const wchar_t* want) -> const BiliSubtitleTrack* {
+    // 2. Pick the Chinese and the English track, if the video has them. Site codes
+    //    are zh / ai-zh for Chinese and en / ai-en for English; machine translations
+    //    sort after the human ones.
+    const auto pick = [&tracks](const std::wstring& want) -> const BiliSubtitleTrack* {
         for (const auto& t : tracks) if (t.lan == want) return &t;
         return nullptr;
     };
-    const BiliSubtitleTrack* chosen = pick(L"zh");
-    if (!chosen) chosen = pick(L"ai-zh");
-    if (!chosen) chosen = &tracks.front();
-    language = chosen->lan;
+    const auto pickTag = [&tracks](const wchar_t* tag) -> const BiliSubtitleTrack* {
+        for (const auto& t : tracks) if (languageIs(t.lan, tag)) return &t;
+        return nullptr;
+    };
+    const BiliSubtitleTrack* chinese = pick(L"zh");
+    if (!chinese) chinese = pick(L"ai-zh");
+    if (!chinese) chinese = pickTag(L"zh");
+    const BiliSubtitleTrack* english = pick(L"en");
+    if (!english) english = pick(L"ai-en");
+    if (!english) english = pickTag(L"en");
 
-    // 3. Download it. The URL lives on a CDN host, not on api.bilibili.com.
-    std::wstring host, path;
-    if (!splitUrl(chosen->url, host, path)) { error = L"字幕地址不是 https"; return false; }
-    std::string body;
-    if (!httpGet(host, path, kReferer, cookie, body, error)) return false;
-    const auto root = json::parse(body);
-    readStyle(root, style);
-    for (const auto& entry : root["body"].elements()) {
-        BiliSubtitleCue cue;
-        cue.from = (*entry)["from"].asDouble(0.0);
-        cue.to = (*entry)["to"].asDouble(0.0);
-        cue.content = fromUtf8((*entry)["content"].asString());
-        if (cue.to <= cue.from || cue.content.empty()) continue;
-        // A Chinese track already holds "Chinese\nEnglish" in one cue; the web
-        // player shows the first line unless the user asks for both.
-        const auto nl = cue.content.find(L'\n');
-        if (nl != std::wstring::npos) cue.content.resize(nl);
-        cues.push_back(std::move(cue));
+    const bool wantEnglish = mode == L"en";
+    const bool wantBoth = mode == L"both";
+    // A language the video does not carry falls back to the other one: showing the
+    // other language beats showing nothing.
+    const BiliSubtitleTrack* primary = wantEnglish ? (english ? english : chinese)
+                                                   : (chinese ? chinese : english);
+    if (!primary) primary = &tracks.front();
+
+    // 3. Download the primary track. The URL lives on a CDN host, not api.bilibili.com.
+    if (!downloadTrack(primary->url, cookie, cues, &style, error)) return false;
+    language = primary->lan;
+
+    // 4. Bilingual: merge the English line under each Chinese cue. A Chinese track
+    //    sometimes already carries "Chinese\nEnglish" in one cue, in which case the
+    //    merge is skipped and the second line is simply kept.
+    bool merged = false;
+    if (wantBoth && english && english != primary) {
+        std::vector<BiliSubtitleCue> englishCues;
+        BiliSubtitleStyle unusedStyle;
+        std::wstring ignored;
+        if (downloadTrack(english->url, cookie, englishCues, &unusedStyle, ignored)) {
+            size_t j = 0;
+            for (auto& cue : cues) {
+                while (j < englishCues.size() && englishCues[j].to <= cue.from) ++j;
+                if (j >= englishCues.size() || englishCues[j].from >= cue.to) continue;
+                const auto nl = cue.content.find(L'\n');
+                if (nl != std::wstring::npos) cue.content.resize(nl);
+                cue.content += L'\n' + englishCues[j].content;
+            }
+            merged = true;
+            language = L"both";
+        }
     }
-    if (cues.empty()) { error = L"字幕内容为空"; return false; }
-    log::info("bilibili", std::format("subtitle track lan={} cues={}", toUtf8(language), cues.size()));
+
+    // Single-language modes keep one line: a Chinese cue may hold both languages and
+    // the second one is noise when only one was asked for.
+    if (!wantBoth) {
+        for (auto& cue : cues) {
+            const auto nl = cue.content.find(L'\n');
+            if (nl != std::wstring::npos) cue.content.resize(nl);
+        }
+    }
+
+    log::info("bilibili", std::format("subtitle track mode={} lang={} cues={} merged={}",
+        toUtf8(mode), toUtf8(language), cues.size(), merged));
     return true;
 }
 
