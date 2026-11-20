@@ -308,6 +308,9 @@ struct Gpu {
     uint64_t fenceValue = 0;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pso;
+    // Custom: the b1 expansion table. Declared by PresentBlit for Dolby Vision, so
+    // the root signature must expose it even when this test never turns it on.
+    ComPtr<ID3D12Resource> doviTable;
     ComPtr<ID3D12DescriptorHeap> srvHeap, rtvHeap;
     ComPtr<ID3D12QueryHeap> queries;
     ComPtr<ID3D12Resource> queryReadback;
@@ -356,7 +359,11 @@ struct Gpu {
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_PARAMETER1 params[2]{};
+        // Custom (完整 B): PresentBlit declares `cbuffer DoviExpansionTable` at b1
+        // for the Dolby Vision highlight expansion. The root signature has to carry
+        // that parameter even when this test never sets the flag that reads it, or
+        // CreateGraphicsPipelineState rejects the shader.
+        D3D12_ROOT_PARAMETER1 params[3]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[0].Constants.Num32BitValues = 16;
@@ -364,9 +371,12 @@ struct Gpu {
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         params[1].DescriptorTable.NumDescriptorRanges = 1;
         params[1].DescriptorTable.pDescriptorRanges = &range;
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[2].Descriptor.ShaderRegister = 1;
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd{};
         rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        rd.Desc_1_1.NumParameters = 2;
+        rd.Desc_1_1.NumParameters = 3;
         rd.Desc_1_1.pParameters = params;
         rd.Desc_1_1.NumStaticSamplers = 1;
         rd.Desc_1_1.pStaticSamplers = &sampler;
@@ -386,6 +396,22 @@ struct Gpu {
         pd.RTVFormats[0] = kFormat;
         pd.SampleDesc.Count = 1;
         if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)))) return false;
+        // One 1536-byte upload buffer for b1 (257 expansion + 65 hue + 3 scalars,
+        // padded to a root-CBV 256-byte placement). Contents stay zero: the test
+        // never sets the flag that reads them.
+        {
+            D3D12_HEAP_PROPERTIES heapProp{D3D12_HEAP_TYPE_UPLOAD};
+            D3D12_RESOURCE_DESC d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = 1536;
+            d.Height = 1;
+            d.DepthOrArraySize = 1;
+            d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &d,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&doviTable)))) return false;
+        }
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.NumDescriptors = 1;
@@ -522,6 +548,9 @@ struct Gpu {
                                      0, 0, 203, 0, 0, 0, 0, 0};
         list->SetGraphicsRoot32BitConstants(0, 16, constants, 0);
         list->SetGraphicsRootDescriptorTable(1, srvHeap->GetGPUDescriptorHandleForHeapStart());
+        // b1 must be bound because the root signature declares it, even though no
+        // test flag here makes the shader read the table.
+        if (doviTable) list->SetGraphicsRootConstantBufferView(2, doviTable->GetGPUVirtualAddress());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         if (timed) list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
         for (int i = 0; i < draws; ++i) list->DrawInstanced(3, 1, 0, 0);
