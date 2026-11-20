@@ -83,11 +83,10 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
     const auto object=doc.object();
     const auto url=object.value("url").toString().trimmed();
     // `quality` is the Bilibili qn the page is showing; the extension sends -1 for
-    // "whatever the page has", which means "let Veyra decide". Clamp to the qn
-    // range the resolver understands and treat anything unusable as 0.
+    // "whatever the page has". Anything negative or out of range collapses to 0 =
+    // let the resolver pick the best rendition.
     int quality=object.value("quality").toInt(0);
-    if(quality<-1||quality>127)quality=0;
-    if(quality<0)quality=0;
+    if(quality<0||quality>127)quality=0;
     // The extension also sends the browser's Bilibili session. Veyra has its own
     // DPAPI-encrypted one, so this is informational only - but it must NOT make
     // the request invalid, or a signed-in browser could never hand a page over

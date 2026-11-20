@@ -521,6 +521,10 @@ void QmlPlayerBridge::openSourceUri(const std::wstring& uri, const std::wstring&
     openAfterCinema(screen ? tr("正在开始屏幕捕获…") : tr("正在打开采集设备 · %1").arg(utf8Of(label)), [this, uri] {
         if (impl_->preOpen) impl_->preOpen();
         impl_->engine.previewView({});
+        // A capture device has no DASH audio address and needs no site Referer.
+        // Without this a card opened right after a Bilibili video would try to
+        // play that video's audio track alongside the card's own picture.
+        clearSiteStream(impl_->options);
         impl_->engine.open(impl_->videoWindow, uri, impl_->options);
         impl_->openingSessionId = impl_->engine.snapshot().sessionId;
         // Only the exact capture startScreenCapture opened in 游戏模式 is one.

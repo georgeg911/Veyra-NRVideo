@@ -244,14 +244,10 @@ void QmlPlayerBridge::openPath(const QString& path) {
     if (impl_->preOpen) impl_->preOpen();
     auto options = impl_->options;
     if (!keepBilibiliStream) {
-        // Do not leave the CDN headers or the DASH address behind either: they
-        // live on impl_->options and would come back with the next applySettings.
-        options.audioPath.clear();
-        options.network.requestHeaders.clear();
-        options.network.userAgent.clear();
-        impl_->options.audioPath.clear();
-        impl_->options.network.requestHeaders.clear();
-        impl_->options.network.userAgent.clear();
+        // The values live on impl_->options too, so clearing only the copy would
+        // bring them back with the next settings rebuild.
+        clearSiteStream(options);
+        clearSiteStream(impl_->options);
     }
     options.softwareDecode = impl_->prefString("decode") == QLatin1String("software");
     options.hardwareDecodeOnly = impl_->prefString("decode") == QLatin1String("hardware");
@@ -286,13 +282,11 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
     // address first (view?bvid -> cid, playurl -> DASH renditions). Both entry
     // points come through here: the paste dialog and the Chrome/Veyra protocol
     // handler (apps/veyra-qml/main.cpp).
-    if (media::isBilibiliPageUrl(trimmed.toStdWString())) {
+    const std::wstring page = trimmed.toStdWString();
+    if (media::isBilibiliPageUrl(page)) {
         if (impl_->biliResolveBusy) { emit notice(tr("上一个 B 站链接还在解析，请稍候"), false); return false; }
         const std::wstring cookie = media::loadBilibiliCookie();
-        const std::wstring page = trimmed.toStdWString();
-        impl_->biliResolveAddress = trimmed;
         impl_->biliResolveSignedIn = media::bilibiliCookieLooksSignedIn(cookie);
-        ++impl_->biliResolveGeneration;
         impl_->biliResolveBusy = true;
         veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {})",
             impl_->biliResolveSignedIn ? "signed in" : "absent", quality));

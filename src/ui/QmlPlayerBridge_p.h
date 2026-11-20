@@ -314,8 +314,6 @@ struct QmlPlayerBridge::Impl {
     // address first. The API round-trips take a second or two, so the work runs
     // on a worker thread and tickBilibiliResolve() picks the result up.
     std::future<media::BilibiliStream> biliResolve;
-    QString biliResolveAddress;          // the page URL being resolved, for the log
-    int biliResolveGeneration = 0;       // drops a result the user has moved on from
     bool biliResolveBusy = false;
     bool biliResolveSignedIn = false;
     // Set between "stream resolved" and the resulting openPath(): openPath must
@@ -1012,5 +1010,16 @@ unsigned normalizeFgMultiplier(unsigned value, engine::FrameGenerationBackend ba
 QString fgEffectId(engine::FrameGenerationBackend backend);
 int xessCeiling(const engine::PlayerSnapshot& snapshot);
 void ensureGdiplus();
+
+// A resolved Bilibili page stream writes the CDN's Referer/UA and its separate
+// DASH audio address onto Impl::options, where they must survive a settings
+// rebuild (PlayerOptions::from(..., keep)). Every other open has to start
+// without them, or a local file - and a capture card, which passes Impl::options
+// straight to the engine - inherits the previous video's second audio track.
+inline void clearSiteStream(engine::PlayerOptions& options) {
+    options.audioPath.clear();
+    options.network.requestHeaders.clear();
+    options.network.userAgent.clear();
+}
 
 } // namespace veyra::ui

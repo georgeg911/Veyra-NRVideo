@@ -11,7 +11,6 @@
 #include <regex>
 #include <string>
 #include <format>
-#include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -37,8 +36,7 @@ std::wstring fromUtf8(const std::string& s) {
 // One HTTPS GET. Bilibili's API answers with UTF-8 JSON.
 // `cookie` is sent as the Cookie header; empty means an anonymous request.
 bool httpGet(const std::wstring& host, const std::wstring& path, const std::wstring& referer,
-             const std::wstring& cookie, std::string& body, std::wstring& error,
-             std::vector<std::wstring>* setCookies = nullptr) {
+             const std::wstring& cookie, std::string& body, std::wstring& error) {
     HINTERNET session = WinHttpOpen(L"Veyra/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { error = L"WinHttpOpen 失败"; return false; }
@@ -69,32 +67,6 @@ bool httpGet(const std::wstring& host, const std::wstring& path, const std::wstr
                 WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                     WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
                 if (status == 200) {
-                    // QR sign-in delivers its session as Set-Cookie headers.
-                    if (setCookies) {
-                        DWORD size = 0;
-                        WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                                            WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &size, WINHTTP_NO_HEADER_INDEX);
-                        if (size) {
-                            std::wstring raw(size / sizeof(wchar_t) + 2, L'\0');
-                            if (WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                                                    WINHTTP_HEADER_NAME_BY_INDEX, raw.data(), &size,
-                                                    WINHTTP_NO_HEADER_INDEX)) {
-                                raw.resize(wcslen(raw.c_str()));
-                                size_t pos = 0;
-                                const std::wstring needle = L"Set-Cookie: ";
-                                while ((pos = raw.find(needle, pos)) != std::wstring::npos) {
-                                    const size_t start = pos + needle.size();
-                                    size_t end = raw.find(L"\r\n", start);
-                                    if (end == std::wstring::npos) end = raw.size();
-                                    std::wstring line = raw.substr(start, end - start);
-                                    const size_t semi = line.find(L';');
-                                    if (semi != std::wstring::npos) line.resize(semi);
-                                    if (!line.empty()) setCookies->push_back(line);
-                                    pos = end;
-                                }
-                            }
-                        }
-                    }
                     DWORD available = 0;
                     do {
                         available = 0;
@@ -217,8 +189,9 @@ std::wstring bilibiliCookiePath() {
 // The cookie is a session credential: SESSDATA alone lets anyone who can read the
 // file act as the account. Every other long-lived credential in this repo (Xbox,
 // PSN, PS5 pairing, Moonlight) goes through DPAPI, so this one does too.
-// A file written by an older build is plain text with no magic: it is still read
-// (so an existing sign-in is not lost) and re-saved encrypted on the next write.
+// A file written by an older build is plain text with no magic: it is still read,
+// so an existing sign-in is not lost. Nothing in this build writes the file; the
+// session comes from the browser extension or the legacy file.
 constexpr char kCookieMagic[4] = {'V', 'B', 'C', 'K'};
 
 bool readAllBytes(const std::wstring& path, std::string& out) {
@@ -263,120 +236,8 @@ std::wstring loadBilibiliCookie() {
     return fromUtf8(plain);
 }
 
-bool saveBilibiliCookie(const std::wstring& cookie) {
-    const std::wstring path = bilibiliCookiePath();
-    if (cookie.empty()) {
-        DeleteFileW(path.c_str());
-        return true;
-    }
-    const std::string plain = toUtf8(cookie);
-    DATA_BLOB input{DWORD(plain.size()), reinterpret_cast<BYTE*>(const_cast<char*>(plain.data()))};
-    DATA_BLOB output{};
-    if (!CryptProtectData(&input, L"Veyra Bilibili session", nullptr, nullptr, nullptr,
-                          CRYPTPROTECT_UI_FORBIDDEN, &output))
-        return false;
-
-    std::vector<char> fileBytes;
-    fileBytes.insert(fileBytes.end(), kCookieMagic, kCookieMagic + 4);
-    fileBytes.insert(fileBytes.end(), reinterpret_cast<const char*>(output.pbData),
-                     reinterpret_cast<const char*>(output.pbData) + output.cbData);
-    LocalFree(output.pbData);
-
-    // Written to a temp file and moved into place so a crash mid-write cannot leave a
-    // truncated cookie behind (which would silently sign the user out).
-    std::wstring temp = path;
-    temp += L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
-    HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    bool ok = WriteFile(file, fileBytes.data(), DWORD(fileBytes.size()), &written, nullptr) != 0
-              && written == fileBytes.size();
-    if (ok) ok = FlushFileBuffers(file) != FALSE;
-    CloseHandle(file);
-    if (ok) ok = MoveFileExW(temp.c_str(), path.c_str(),
-                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-    if (!ok) DeleteFileW(temp.c_str());
-    return ok;
-}
-
 bool bilibiliCookieLooksSignedIn(const std::wstring& cookie) {
     return cookie.find(L"SESSDATA=") != std::wstring::npos;
-}
-
-BilibiliQrLogin startBilibiliQrLogin() {
-    BilibiliQrLogin result;
-    std::string body;
-    std::wstring error;
-    if (!httpGet(L"passport.bilibili.com",
-                 L"/x/passport-login/web/qrcode/generate",
-                 L"https://www.bilibili.com", L"", body, error)) {
-        result.error = L"无法获取二维码：" + error;
-        return result;
-    }
-    const auto root = json::parse(body);
-    const long long code = root["code"].asInt(-1);
-    if (code != 0) {
-        result.error = std::format(L"二维码接口返回错误码 {}", code);
-        return result;
-    }
-    const std::string key = root["data"]["qrcode_key"].asString();
-    const std::string url = root["data"]["url"].asString();
-    if (key.empty() || url.empty()) {
-        result.error = L"二维码数据不完整";
-        return result;
-    }
-    result.qrKey = fromUtf8(key);
-    result.qrUrl = fromUtf8(url);
-    result.ok = true;
-    log::info("bilibili", "qr login code requested");
-    return result;
-}
-
-BilibiliQrPoll pollBilibiliQrLogin(const std::wstring& qrKey) {
-    BilibiliQrPoll result;
-    std::string body;
-    std::wstring error;
-    std::vector<std::wstring> setCookies;
-    const std::wstring path = L"/x/passport-login/web/qrcode/poll?qrcode_key=" + qrKey;
-    if (!httpGet(L"passport.bilibili.com", path, L"https://www.bilibili.com", L"", body, error, &setCookies)) {
-        result.state = BilibiliQrPoll::State::Error;
-        result.message = L"轮询失败：" + error;
-        return result;
-    }
-    const auto root = json::parse(body);
-    const long long code = root["code"].asInt(-1);
-    if (code != 0) {
-        result.state = BilibiliQrPoll::State::Error;
-        result.message = std::format(L"轮询接口返回错误码 {}", code);
-        return result;
-    }
-    // The sign-in state is the inner data.code:
-    //   86101 not scanned, 86090 scanned/awaiting confirmation, 0 confirmed,
-    //   86038 expired.
-    const long long inner = root["data"]["code"].asInt(-1);
-    switch (inner) {
-    case 86101: result.state = BilibiliQrPoll::State::Waiting; result.message = L"等待扫码"; break;
-    case 86090: result.state = BilibiliQrPoll::State::Scanned; result.message = L"已扫码，请在手机上确认"; break;
-    case 86038: result.state = BilibiliQrPoll::State::Expired; result.message = L"二维码已过期"; break;
-    case 0: {
-        result.state = BilibiliQrPoll::State::Confirmed;
-        std::wstring cookie;
-        for (const auto& c : setCookies) {
-            if (!cookie.empty()) cookie += L"; ";
-            cookie += c;
-        }
-        result.cookie = cookie;
-        result.message = L"登录成功";
-        log::info("bilibili", std::format("qr login confirmed cookies={}", setCookies.size()));
-        break;
-    }
-    default:
-        result.state = BilibiliQrPoll::State::Error;
-        result.message = std::format(L"未知状态 {}", inner);
-        break;
-    }
-    return result;
 }
 
 BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wstring& cookie, int quality) {
@@ -452,7 +313,8 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     const std::string cidText = std::to_string(cid);
     result.title = fromUtf8(viewRoot["data"]["title"].asString());
 
-    // 2. Ask for the DASH manifest. fnval=16 requests DASH, fourk allows 4K.
+    // 2. Ask for the DASH manifest. fnval 4048 = DASH | HDR | 4K | Dolby audio |
+    //    Dolby Vision | 8K | AV1; fourk=1 keeps 4K in the answer.
     // quality = 0 keeps the old behaviour (ask for the best rendition); a positive
     // value is the page's own qn, for "follow the web player's quality".
     std::string playBody;
@@ -508,7 +370,9 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
         return chosen;
     };
     const json::Value* best = pickRendition(true);
-    if (!best) best = pickRendition(false);
+    // A specific qn skips the codec filter entirely, so the second pass could only
+    // repeat the first; only "best available" needs the H.264-then-anything fallback.
+    if (!best && quality <= 0) best = pickRendition(false);
     if (!best) {
         result.error = L"没有找到可播放的视频流地址";
         return result;
@@ -549,8 +413,8 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
             log::warn("bilibili", "no DASH audio track in the response; playback would be silent");
         }
     }
-    result.cid = cid;
-    result.pageIndex = pageIndex;
+
+
     result.ok = true;
     log::info("bilibili", std::format("resolved {} -> video codec={} quality={} audio={}",
         toUtf8(pageUrl), bestCodec, bestId, result.audioUrl.empty() ? "none" : toUtf8(result.audioCodec)));

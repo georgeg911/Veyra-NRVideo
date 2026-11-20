@@ -29,8 +29,6 @@ struct BilibiliStream {
     // sent twice and the CDN rejects the request.
     std::wstring userAgent;
     std::wstring title;      // page title, for the UI
-    long long cid = 0;       // page id, needed for subtitles/danmaku of this part
-    int pageIndex = 1;       // 1-based part number from ?p=
     std::wstring error;      // human-readable reason when ok == false
     unsigned width = 0;
     unsigned height = 0;
@@ -55,38 +53,12 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl,
 // Where the user's cookie is kept between runs.
 std::wstring bilibiliCookiePath();
 
-// Reads the stored cookie (empty when none). The file holds only the Cookie header.
+// Reads the stored cookie (empty when none). The file holds only the Cookie header,
+// DPAPI-encrypted behind a "VBCK" magic; a plain-text file written by an older
+// build is still read, so an existing sign-in is not lost.
 std::wstring loadBilibiliCookie();
-
-// Stores the cookie. An empty string clears it. Returns false when the file cannot
-// be written.
-bool saveBilibiliCookie(const std::wstring& cookie);
 
 // True when `cookie` looks like a signed-in Bilibili session: it must carry SESSDATA.
 bool bilibiliCookieLooksSignedIn(const std::wstring& cookie);
-
-// --- QR sign-in -------------------------------------------------------------
-// The user scans a QR code with the Bilibili app; the poll then returns the
-// session cookies. This is the same flow the website uses and needs no password.
-struct BilibiliQrLogin {
-    bool ok = false;          // the generate call succeeded
-    std::wstring qrKey;       // opaque key for pollBilibiliQr()
-    std::wstring qrUrl;       // URL to encode as the QR image
-    std::wstring error;
-};
-
-// One poll result.
-struct BilibiliQrPoll {
-    enum class State { Waiting, Scanned, Confirmed, Expired, Error };
-    State state = State::Error;
-    std::wstring cookie;      // set when state == Confirmed
-    std::wstring message;
-};
-
-// Asks the server for a new QR code.
-BilibiliQrLogin startBilibiliQrLogin();
-
-// Polls once. Call about once a second; `Confirmed` carries the Cookie header value.
-BilibiliQrPoll pollBilibiliQrLogin(const std::wstring& qrKey);
 
 } // namespace veyra::media

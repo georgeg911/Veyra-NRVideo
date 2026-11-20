@@ -43,13 +43,6 @@ unsigned hexValue(char c) {
 
 } // namespace
 
-bool Value::asBool(bool fallback) const {
-    if (type_ == Type::Bool) return bool_;
-    // Bilibili sometimes encodes a flag as 0/1 rather than true/false.
-    if (type_ == Type::Number) return number_ != 0.0;
-    return fallback;
-}
-
 long long Value::asInt(long long fallback) const {
     if (type_ == Type::Number) return static_cast<long long>(number_);
     // A few endpoints hand back numbers as quoted strings.
@@ -61,18 +54,6 @@ long long Value::asInt(long long fallback) const {
         }
     }
     if (type_ == Type::Bool) return bool_ ? 1 : 0;
-    return fallback;
-}
-
-double Value::asDouble(double fallback) const {
-    if (type_ == Type::Number) return number_;
-    if (type_ == Type::String && !string_.empty()) {
-        try {
-            return std::stod(string_);
-        } catch (...) {
-            return fallback;
-        }
-    }
     return fallback;
 }
 
@@ -96,16 +77,6 @@ size_t Value::size() const {
     if (type_ == Type::Array) return array_.size();
     if (type_ == Type::Object) return object_.size();
     return 0;
-}
-
-const std::vector<Value>& Value::items() const {
-    static const std::vector<Value> empty;
-    return type_ == Type::Array ? array_ : empty;
-}
-
-const std::map<std::string, std::string>& Value::members() const {
-    static const std::map<std::string, std::string> empty;
-    return empty;
 }
 
 std::vector<const Value*> Value::elements() const {
