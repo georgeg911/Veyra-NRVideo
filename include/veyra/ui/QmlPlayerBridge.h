@@ -1614,6 +1614,9 @@ private:
     void refreshSubtitles(const std::wstring& media);
     void tickSubtitles();
     void tickImageBatch();
+    // Local custom build: collects the Bilibili page->stream worker result and
+    // opens the CDN address with its Referer/UA and DASH audio.
+    void tickBilibiliResolve();
     void tickCapture();
     void tickPs5();
     void tickPs5Control(bool force = false);

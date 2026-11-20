@@ -200,6 +200,11 @@ void QmlPlayerBridge::tickPlaylist() {
 
 void QmlPlayerBridge::openPath(const QString& path) {
     if (path.isEmpty()) return;
+    // A resolved Bilibili stream keeps its DASH audio address and the CDN's
+    // Referer/UA for exactly this one open. Anything else must start clean, or
+    // a local file would inherit the previous video's second audio track.
+    const bool keepBilibiliStream = impl_->bilibiliOpenPending;
+    impl_->bilibiliOpenPending = false;
     endExclusionMove(false);
     impl_->exclusionSelected=-1;
     flushHdrMemory();impl_->hdrTitleApplied.clear();
@@ -223,7 +228,7 @@ void QmlPlayerBridge::openPath(const QString& path) {
     impl_->sourceLabel = wide;
     impl_->liveKind.clear();
     impl_->liveLabel.clear();
-    if(network){impl_->liveKind=QStringLiteral("url");impl_->liveLabel=QUrl(path).host();}
+    if(network){impl_->liveKind=QStringLiteral("url");impl_->liveLabel=keepBilibiliStream?QStringLiteral("www.bilibili.com"):QUrl(path).host();}
     ++impl_->thumbnailGeneration;
     emit thumbnailSourceChanged(network?QString():path);
     emit thumbnailGenerationChanged();
@@ -238,6 +243,16 @@ void QmlPlayerBridge::openPath(const QString& path) {
     if(!network)rememberSource(QStringLiteral("file"), path);
     if (impl_->preOpen) impl_->preOpen();
     auto options = impl_->options;
+    if (!keepBilibiliStream) {
+        // Do not leave the CDN headers or the DASH address behind either: they
+        // live on impl_->options and would come back with the next applySettings.
+        options.audioPath.clear();
+        options.network.requestHeaders.clear();
+        options.network.userAgent.clear();
+        impl_->options.audioPath.clear();
+        impl_->options.network.requestHeaders.clear();
+        impl_->options.network.userAgent.clear();
+    }
     options.softwareDecode = impl_->prefString("decode") == QLatin1String("software");
     options.hardwareDecodeOnly = impl_->prefString("decode") == QLatin1String("hardware");
     options.deinterlace=deinterlaceAvailable()&&impl_->prefBool("deinterlace",true);
@@ -261,11 +276,62 @@ bool QmlPlayerBridge::deinterlaceAvailable() const { return media::FFmpegDeinter
 void QmlPlayerBridge::openNetworkDialog(){emit navigate(QStringLiteral("network"));}
 bool QmlPlayerBridge::openNetworkAddress(const QString& address){
     const QString trimmed = address.trimmed();
+    // A Bilibili page URL is not a media URL: FFmpeg cannot open
+    // https://www.bilibili.com/video/BV... directly. Resolve it to the CDN
+    // address first (view?bvid -> cid, playurl -> DASH renditions). Both entry
+    // points come through here: the paste dialog and the Chrome/Veyra protocol
+    // handler (apps/veyra-qml/main.cpp).
+    if (media::isBilibiliPageUrl(trimmed.toStdWString())) {
+        if (impl_->biliResolveBusy) { emit notice(tr("上一个 B 站链接还在解析，请稍候"), false); return false; }
+        const std::wstring cookie = media::loadBilibiliCookie();
+        const std::wstring page = trimmed.toStdWString();
+        impl_->biliResolveAddress = trimmed;
+        impl_->biliResolveSignedIn = media::bilibiliCookieLooksSignedIn(cookie);
+        ++impl_->biliResolveGeneration;
+        impl_->biliResolveBusy = true;
+        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {})",
+            impl_->biliResolveSignedIn ? "signed in" : "absent"));
+        impl_->biliResolve = std::async(std::launch::async, [page, cookie] {
+            try { return media::resolveBilibiliStream(page, cookie); }
+            catch (...) { media::BilibiliStream r; r.error = L"Bilibili resolution failed"; return r; }
+        });
+        emit notice(tr("正在解析 B 站链接…"), false);
+        return true;
+    }
     const QUrl url(trimmed,QUrl::StrictMode);
     if(!url.isValid()||url.host().isEmpty()||!media::networkMediaInput(wideOf(url.scheme()+QStringLiteral(":")))){
         emit notice(tr("请输入有效的 HTTP、HTTPS 或 RTSP 视频地址"),true);return false;
     }
     openPath(url.adjusted(QUrl::RemoveFragment).toString(QUrl::FullyEncoded));return true;
+}
+
+void QmlPlayerBridge::tickBilibiliResolve() {
+    if (!impl_->biliResolveBusy) return;
+    if (impl_->biliResolve.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+    const media::BilibiliStream stream = impl_->biliResolve.get();
+    impl_->biliResolveBusy = false;
+    if (!stream.ok) {
+        veyra::log::warn("bilibili", QString::fromStdWString(stream.error).toStdString());
+        emit notice(tr("B 站链接解析失败：%1").arg(QString::fromStdWString(stream.error)), true);
+        return;
+    }
+    veyra::log::info("bilibili", std::format("resolved {}x{} qn={} audio={}",
+        stream.width, stream.height, stream.quality, stream.audioUrl.empty() ? "muxed" : "dash"));
+    // The CDN needs the site's Referer and User-Agent; they ride on
+    // options.network (NetworkSettings), which EngineController copies to the
+    // demux session and networkMediaHeaders() turns into the "headers" /
+    // "user_agent" FFmpeg options. (od.networkHeaders is a leftover field that
+    // nothing reads.) The audio address travels separately: a DASH video
+    // container carries no audio track of its own.
+    impl_->options.network.requestHeaders = stream.headers;
+    impl_->options.network.userAgent = stream.userAgent;
+    impl_->options.audioPath = stream.audioUrl;
+    impl_->bilibiliOpenPending = true;
+    QString info = QStringLiteral("%1x%2").arg(stream.width).arg(stream.height);
+    if (!stream.codec.empty()) info += QStringLiteral(" ") + QString::fromStdWString(stream.codec);
+    if (!impl_->biliResolveSignedIn) info += tr("（未登录，画质受限）");
+    emit notice(tr("正在播放：%1  %2").arg(QString::fromStdWString(stream.title), info), false);
+    openPath(QString::fromStdWString(stream.url));
 }
 
 void QmlPlayerBridge::bringToFront() {

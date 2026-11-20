@@ -643,6 +643,10 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/media/DemuxSession.cpp
     src/media/FFmpegVideoDecoder.cpp
     src/media/FFmpegDeinterlacer.cpp
+    # Bilibili: page URL -> CDN stream. Local custom build only; the upstream
+    # integration (#172) removed the browse UI, not the resolver.
+    src/media/BilibiliResolver.cpp
+    src/media/BiliJson.cpp
   )
   veyra_apply_warnings(veyra_media)
   # FFmpeg headers are third-party; /WX stays off for this target

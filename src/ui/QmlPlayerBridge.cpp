@@ -459,6 +459,7 @@ QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesyst
         updateMaskOverlay();
         tickSubtitles();
         tickImageBatch();
+        tickBilibiliResolve();
         tickCapture();
         tickPs5();
         tickMoonlight();

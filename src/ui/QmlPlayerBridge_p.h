@@ -6,6 +6,7 @@
 #include "veyra/gfx/PresentSink.h"
 #include "veyra/gfx/NvidiaVrr.h"
 #include "veyra/media/NetworkInput.h"
+#include "veyra/media/BilibiliResolver.h"
 #include "veyra/media/FormatBadgeWindow.h"
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/RuntimePaths.h"
@@ -306,6 +307,20 @@ struct QmlPlayerBridge::Impl {
     std::wstring exportOutput;
     QString exportStatus;
     engine::PlayerOptions options;
+
+    // --- Bilibili page resolution (local custom build) ---------------------
+    // A Bilibili *page* URL is not a media URL: it has to be turned into the
+    // CDN address, the site's Referer/User-Agent and a separate DASH audio
+    // address first. The API round-trips take a second or two, so the work runs
+    // on a worker thread and tickBilibiliResolve() picks the result up.
+    std::future<media::BilibiliStream> biliResolve;
+    QString biliResolveAddress;          // the page URL being resolved, for the log
+    int biliResolveGeneration = 0;       // drops a result the user has moved on from
+    bool biliResolveBusy = false;
+    bool biliResolveSignedIn = false;
+    // Set between "stream resolved" and the resulting openPath(): openPath must
+    // keep the DASH audio address and the request headers for this one open.
+    bool bilibiliOpenPending = false;
 
     // The export job manager is the real thing: state, progress and encoded
     // counts come from its snapshot.
