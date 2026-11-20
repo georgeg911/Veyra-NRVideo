@@ -1,5 +1,6 @@
 // QML bridge: Core responsibilities.
 #include "QmlPlayerBridge_p.h"
+#include "LiveTranslation.h"
 #include "veyra/sink/AudioGain.h"
 #include "veyra/engine/MicrophoneCapture.h"
 #include "veyra/ui/NvidiaVrrProfileController.h"
@@ -59,7 +60,9 @@ namespace {bool prepareStartupPreset(const engine::PresetEntry& entry, engine::C
 QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesystem::path dataDirectory,
                                 QObject* parent)
     : QObject(parent), impl_(std::make_unique<Impl>(engine, std::move(dataDirectory))) {
+    liveTranslation_ = new LiveTranslation(QString::fromStdWString(impl_->dataDir.wstring()), this);
     connect(this,&QmlPlayerBridge::mediaOpenRequested,this,[this]{
+        liveTranslation_->setPlayback(impl_->snapshot.sessionId, false, true);
         endExclusionMove(false);impl_->exclusionSelected=-1;beginProtectionDraw(QString{});
         emit protectionChanged();
     });
@@ -169,6 +172,7 @@ QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesyst
 #endif
     // Before anything opens: the renderer reads the output choice at start().
     applyPreference(QStringLiteral("language"));
+    applyPreference(QStringLiteral("updateDownloadRoute"));
     applyPreference(QStringLiteral("audioDevice"));
     applyPreference(QStringLiteral("audioForceStereo"));
     applyPreference(QStringLiteral("magewellLowLatency"));
@@ -309,6 +313,19 @@ QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesyst
         if (p.contains(QStringLiteral("vfgAutoRegulate"))) {
             const bool on = p.value(QStringLiteral("vfgAutoRegulate")).toBool();
             if (s.vfgAutoRegulate != on) { s.vfgAutoRegulate = on; changed = true; }
+        }
+        // Adaptive multiplier, frame pacing repair and Live HUD Lock (from PushFPS).
+        if (p.contains(QStringLiteral("fgAdaptive"))) {
+            const bool on = p.value(QStringLiteral("fgAdaptive")).toBool();
+            if (s.fgAdaptive != on) { s.fgAdaptive = on; changed = true; }
+        }
+        if (p.contains(QStringLiteral("pacingRepair"))) {
+            const bool on = p.value(QStringLiteral("pacingRepair")).toBool();
+            if (s.pacingRepair != on) { s.pacingRepair = on; changed = true; }
+        }
+        if (p.contains(QStringLiteral("hudLock"))) {
+            const bool on = p.value(QStringLiteral("hudLock")).toBool();
+            if (s.hudLock != on) { s.hudLock = on; changed = true; }
         }
         if (!defaultFlowApplied && p.contains(QStringLiteral("contentRate"))) {
             const int rate = p.value(QStringLiteral("contentRate")).toInt();
@@ -724,6 +741,7 @@ QmlPlayerBridge::QmlPlayerBridge(engine::EngineController& engine, std::filesyst
     // Unsupported saved FG choices were repaired together with both modes
     // above, using actual provider availability rather than a brand alone.
 }
+QObject* QmlPlayerBridge::liveTranslation() const { return liveTranslation_; }
 
 QmlPlayerBridge::~QmlPlayerBridge() {
     // Before anything is torn down: this reads the playback position.

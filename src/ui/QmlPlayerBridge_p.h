@@ -295,7 +295,7 @@ struct QmlPlayerBridge::Impl {
     int thumbnailGeneration = 0;
     // The live source kind and label ("" for a file), for the page headers.
     QString liveKind, liveLabel;
-    // A live open waiting for the 极简 switch to settle (openAfterCinema); the
+    // A live open waiting for the destination page to settle; the
     // generation lets a newer open or a stop cancel it.
     int liveOpenGen = 0;
     QString pendingLiveText;
@@ -375,6 +375,7 @@ struct QmlPlayerBridge::Impl {
     QString currentPage;
     std::wstring captureDevice;
     QString screenTarget;
+    bool screenCropPreview = false;
     QString remotePlayHost, remotePlayPin;
 
     QTimer* timer = nullptr;
@@ -684,19 +685,28 @@ struct QmlPlayerBridge::Impl {
     uint64_t aspectSession = 0;
     std::jthread gpuSampler;                 // joined before gpuUtil goes away
     std::filesystem::path prefsFile() const { return dataDir / L"qml-preferences.v1.json"; }
+    // The file exists but was not read (locked by antivirus/OneDrive, or damaged):
+    // saving the in-memory defaults would replace every saved setting with them.
+    bool prefsUnreadable = false;
     void loadPrefs() {
         QFile file(QString::fromStdWString(prefsFile().wstring()));
         if (!file.exists()) return;
-        if (!file.open(QIODevice::ReadOnly)) { veyra::log::warn("ui-prefs", "qml preferences unreadable; defaults used"); return; }
+        if (!file.open(QIODevice::ReadOnly)) {
+            prefsUnreadable = true;
+            veyra::log::warn("ui-prefs", "qml preferences unreadable; defaults used, file kept, saving disabled this session");
+            return;
+        }
         QJsonParseError error{};
         const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
         if (error.error != QJsonParseError::NoError || !doc.isObject()) {
-            veyra::log::warn("ui-prefs", "qml preferences damaged; defaults used, file kept");
+            prefsUnreadable = true;
+            veyra::log::warn("ui-prefs", "qml preferences damaged; defaults used, file kept, saving disabled this session");
             return;
         }
         prefs = doc.object().toVariantMap();
     }
     bool savePrefs() {
+        if (prefsUnreadable) return false;
         const QString path = QString::fromStdWString(prefsFile().wstring());
         // A fresh data directory may not exist yet: the first preference saved
         // on a new profile used to fail and was silently kept only in memory.
