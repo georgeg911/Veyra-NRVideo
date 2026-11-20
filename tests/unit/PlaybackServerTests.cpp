@@ -11,7 +11,8 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     int delivered=0, failed=0, checks=0;
     QString last;
-    veyra::ui::PlaybackServer server([&](const QString& url){++delivered;last=url;});
+    int lastQuality=-1;
+    veyra::ui::PlaybackServer server([&](const QString& url,int quality){++delivered;last=url;lastQuality=quality;});
     if(!server.listen(0)) return 1;
     const QByteArray host="127.0.0.1:"+QByteArray::number(server.serverPort());
     const QByteArray origin="chrome-extension://"+QByteArray(32,'a');
@@ -51,9 +52,15 @@ int main(int argc, char** argv) {
     check(request(post(R"({"url":"file:///C:/Windows/win.ini"})")).startsWith("HTTP/1.1 400"),"file URL denied");
     check(request(post(R"({"url":"https://name:secret@example.com"})")).startsWith("HTTP/1.1 400"),"URL credentials denied");
     check(request(post(R"({"url":"https://example.com","cookie":"bad\r\nInjected: yes"})")).startsWith("HTTP/1.1 400"),"cookie injection denied");
-    check(request(post(R"({"url":"https://example.com","cookie":"session=test"})")).startsWith("HTTP/1.1 400"),"credential transfer denied");
-    check(delivered==1,"rejections never dispatch");
+    // A browser that is signed in to Bilibili sends its session along; that must
+    // not invalidate the request (Veyra keeps its own session, but the extension
+    // always attaches the browser's).
+    check(request(post(R"({"url":"https://example.com","cookie":"session=test"})")).startsWith("HTTP/1.1 200"),"browser cookie accepted");
+    check(delivered==2,"rejections never dispatch");
     check(request(post(R"({"url":"https://example.com/live.m3u8","quality":80,"cookie":""})")).startsWith("HTTP/1.1 200"),"legacy direct URL without credentials");
-    check(delivered==2&&last=="https://example.com/live.m3u8","legacy direct URL delivered");
+    check(delivered==3&&last=="https://example.com/live.m3u8","legacy direct URL delivered");
+    check(lastQuality==80,"quality reaches the handler");
+    check(request(post(R"({"url":"https://example.com/b.mp4","quality":-1})")).startsWith("HTTP/1.1 200"),"page quality sentinel accepted");
+    check(delivered==4&&lastQuality==0,"-1 collapses to best");
     std::cout<<checks<<" checks, "<<failed<<" failures\n";return failed?1:0;
 }

@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 set "EXE=%~1"
-if not defined EXE set "EXE=%~dp0..\..eyra_qml_ui.exe"
+if not defined EXE set "EXE=%~dp0..\..\..\build\veyra_qml_ui.exe"
 if not exist "%EXE%" (
   echo Usage: install-protocol.cmd "full path to veyra_qml_ui.exe"
   exit /b 1

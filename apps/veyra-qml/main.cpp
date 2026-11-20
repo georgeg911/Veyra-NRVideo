@@ -712,10 +712,13 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     // extension falls back to when the player is not running. Parsed here because
     // the bridge below consumes it; the handler is installed by install-protocol.cmd.
     QString protocolUrl;
+    // The extension appends the Bilibili qn it read from the page (0 = best).
+    int protocolQuality = 0;
     for (const QString& a : QCoreApplication::arguments()) {
         if (!a.startsWith(QStringLiteral("veyra://"), Qt::CaseInsensitive)) continue;
         const QUrlQuery query(QUrl(a).query());
         protocolUrl = query.queryItemValue(QStringLiteral("url"), QUrl::FullyDecoded);
+        protocolQuality = query.queryItemValue(QStringLiteral("quality")).toInt();
         break;
     }
     ui::QmlPlayerBridge bridge(controller, dataDirectory);
@@ -724,16 +727,16 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     // Custom (Chrome bridge): local HTTP endpoint the browser extension posts to.
     // 127.0.0.1 only; port 18765 is fixed so the extension can find it without
     // reading anything off disk (a browser cannot open local files).
-    ui::PlaybackServer playbackServer([&bridge](const QString& url){
-        bridge.bringToFront();bridge.openNetworkAddress(url);
+    ui::PlaybackServer playbackServer([&bridge](const QString& url, int quality){
+        bridge.bringToFront();bridge.openNetworkAddress(url, quality);
     });
     playbackServer.listen(18765);
     if (!protocolUrl.isEmpty()) {
-        veyra::log::info("playback-server", std::format("protocol request: host={}",
-                                                         QUrl(protocolUrl).host().toStdString()));
-        QTimer::singleShot(1500, &bridge, [&bridge, url = protocolUrl] {
+        veyra::log::info("playback-server", std::format("protocol request: host={} qn={}",
+                                                         QUrl(protocolUrl).host().toStdString(), protocolQuality));
+        QTimer::singleShot(1500, &bridge, [&bridge, url = protocolUrl, quality = protocolQuality] {
             bridge.bringToFront();
-            bridge.openNetworkAddress(url);
+            bridge.openNetworkAddress(url, quality);
         });
     }
 

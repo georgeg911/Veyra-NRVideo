@@ -275,7 +275,12 @@ void QmlPlayerBridge::openPath(const QString& path) {
 bool QmlPlayerBridge::deinterlaceAvailable() const { return media::FFmpegDeinterlacer::available(); }
 void QmlPlayerBridge::openNetworkDialog(){emit navigate(QStringLiteral("network"));}
 bool QmlPlayerBridge::openNetworkAddress(const QString& address){
+    return openNetworkAddress(address, 0);
+}
+
+bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
     const QString trimmed = address.trimmed();
+    if (quality < 0 || quality > 127) quality = 0;
     // A Bilibili page URL is not a media URL: FFmpeg cannot open
     // https://www.bilibili.com/video/BV... directly. Resolve it to the CDN
     // address first (view?bvid -> cid, playurl -> DASH renditions). Both entry
@@ -289,10 +294,10 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address){
         impl_->biliResolveSignedIn = media::bilibiliCookieLooksSignedIn(cookie);
         ++impl_->biliResolveGeneration;
         impl_->biliResolveBusy = true;
-        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {})",
-            impl_->biliResolveSignedIn ? "signed in" : "absent"));
-        impl_->biliResolve = std::async(std::launch::async, [page, cookie] {
-            try { return media::resolveBilibiliStream(page, cookie); }
+        veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {})",
+            impl_->biliResolveSignedIn ? "signed in" : "absent", quality));
+        impl_->biliResolve = std::async(std::launch::async, [page, cookie, quality] {
+            try { return media::resolveBilibiliStream(page, cookie, quality); }
             catch (...) { media::BilibiliStream r; r.error = L"Bilibili resolution failed"; return r; }
         });
         emit notice(tr("正在解析 B 站链接…"), false);

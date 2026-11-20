@@ -12,14 +12,19 @@ namespace veyra::ui {
 // Local HTTP endpoint the browser extension talks to.
 //
 //   GET  /ping          -> {"ok":true,"app":"veyra"}   (extension uses it to detect Veyra)
-//   POST /play          -> {"ok":true}                  body: {"url":"https://..."}
+//   POST /play          -> {"ok":true}                  body: {"url":"https://...","quality":0,"cookie":"..."}
+//
+// `quality` is the Bilibili qn the page is currently showing (0 = let Veyra pick
+// the best). `cookie` is the browser's Bilibili session; it is optional and kept
+// only for logging - Veyra already owns a DPAPI-encrypted session of its own.
 //
 // Loopback only, bounded HTTP framing, extension-origin/Host validation; queued
 // handler receives only validated HTTP(S) playback requests. No wildcard CORS.
 class PlaybackServer : public QObject {
     Q_OBJECT
 public:
-    using PlayHandler=std::function<void(const QString&)>;
+    // quality: 0 = best available, otherwise the Bilibili qn from the page.
+    using PlayHandler=std::function<void(const QString& url, int quality)>;
     explicit PlaybackServer(PlayHandler handler, QObject* parent = nullptr);
     ~PlaybackServer() override;
 

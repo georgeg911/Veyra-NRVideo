@@ -82,16 +82,31 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
     const auto doc=QJsonDocument::fromJson(request.mid(end+4),&error);
     const auto object=doc.object();
     const auto url=object.value("url").toString().trimmed();
-    const auto legacyCookie=object.value("cookie");
+    // `quality` is the Bilibili qn the page is showing; the extension sends -1 for
+    // "whatever the page has", which means "let Veyra decide". Clamp to the qn
+    // range the resolver understands and treat anything unusable as 0.
+    int quality=object.value("quality").toInt(0);
+    if(quality<-1||quality>127)quality=0;
+    if(quality<0)quality=0;
+    // The extension also sends the browser's Bilibili session. Veyra has its own
+    // DPAPI-encrypted one, so this is informational only - but it must NOT make
+    // the request invalid, or a signed-in browser could never hand a page over
+    // (the af1b13a8 removal left that check in place with no reader for the value).
+    const auto browserCookie=object.value("cookie").toString();
     const QUrl parsed(url,QUrl::StrictMode);
     if(error.error!=QJsonParseError::NoError||!doc.isObject()||!parsed.isValid()||
        (parsed.scheme()!="http"&&parsed.scheme()!="https")||parsed.host().isEmpty()||
-       !parsed.userInfo().isEmpty()||url.size()>8192||
-       (!legacyCookie.isUndefined() && legacyCookie != QJsonValue(QString()))){
+       !parsed.userInfo().isEmpty()||url.size()>8192){
         respond(socket,400,R"({"ok":false,"error":"invalid playback request"})",origin);return;
     }
-    QMetaObject::invokeMethod(this,[handler=handler_,url]{if(handler)handler(url);},Qt::QueuedConnection);
-    log::info("playback-server",std::format("play requested: host={}",parsed.host().toStdString()));
+    // The value is never used, but a CRLF in it would be a log-injection vector.
+    if(browserCookie.contains('\r')||browserCookie.contains('\n')){
+        respond(socket,400,R"({"ok":false,"error":"invalid playback request"})",origin);return;
+    }
+    if(!browserCookie.isEmpty())
+        log::info("playback-server",std::format("request carried {} bytes of browser cookie; Veyra uses its own session",browserCookie.size()));
+    QMetaObject::invokeMethod(this,[handler=handler_,url,quality]{if(handler)handler(url,quality);},Qt::QueuedConnection);
+    log::info("playback-server",std::format("play requested: host={} qn={}",parsed.host().toStdString(),quality));
     respond(socket,200,R"({"ok":true})",origin);
 }
 void PlaybackServer::onNewConnection(){
