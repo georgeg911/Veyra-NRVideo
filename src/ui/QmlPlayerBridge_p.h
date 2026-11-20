@@ -316,6 +316,14 @@ struct QmlPlayerBridge::Impl {
     std::future<media::BilibiliStream> biliResolve;
     bool biliResolveBusy = false;
     bool biliResolveSignedIn = false;
+    // liveOpenGen at the moment the resolve started. Open-path bumps liveOpenGen
+    // for every new source, so a mismatch means the user moved on while the two
+    // API calls were in flight and the result must be dropped instead of stealing
+    // the playback they started meanwhile.
+    uint64_t biliResolveGen = 0;
+    // Title of the resolved video, handed from the worker result to the openPath()
+    // that consumes it so the source label can show the video instead of a host name.
+    QString pendingBiliTitle;
     // Set between "stream resolved" and the resulting openPath(): openPath must
     // keep the DASH audio address and the request headers for this one open.
     bool bilibiliOpenPending = false;

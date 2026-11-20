@@ -40,7 +40,7 @@ bool httpGet(const std::wstring& host, const std::wstring& path, const std::wstr
     HINTERNET session = WinHttpOpen(L"Veyra/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { error = L"WinHttpOpen 失败"; return false; }
-    WinHttpSetTimeouts(session, 15000, 15000, 15000, 15000);
+    WinHttpSetTimeouts(session, 10000, 10000, 10000, 10000);
 
     bool ok = false;
     HINTERNET connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -103,6 +103,23 @@ const json::Value& dashArray(const json::Value& playRoot, const char* name) {
     return playRoot["data"]["dash"][name];
 }
 
+// Bilibili answers code 0 on success and a number otherwise. A number alone is
+// useless to the person who just pasted a link, so name the ones a paste can hit
+// and keep the raw code for the rest.
+std::wstring apiFailure(const wchar_t* what, long long code) {
+    switch (code) {
+    case -404:
+    case -400: return std::format(L"{}失败：视频不存在或已被删除", what);
+    case -403: return std::format(L"{}失败：无权访问，可能需要先登录", what);
+    case -10403: return std::format(L"{}失败：该视频在当前地区不可播放", what);
+    case 62002: return std::format(L"{}失败：稿件不可见（已删除或设为私密）", what);
+    case 62004: return std::format(L"{}失败：稿件正在审核", what);
+    case 87007:
+    case 87008: return std::format(L"{}失败：该画质需要大会员", what);
+    default: return std::format(L"{}失败（错误码 {}）", what, code);
+    }
+}
+
 } // namespace
 
 // One HTTPS GET that reports where a redirect points instead of a body. b23.tv links
@@ -112,7 +129,7 @@ bool httpFollowLocation(const std::wstring& host, const std::wstring& path,
     HINTERNET session = WinHttpOpen(L"Veyra/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { error = L"WinHttpOpen 失败"; return false; }
-    WinHttpSetTimeouts(session, 15000, 15000, 15000, 15000);
+    WinHttpSetTimeouts(session, 10000, 10000, 10000, 10000);
     bool ok = false;
     HINTERNET connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (connect) {
@@ -285,7 +302,7 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     const auto viewRoot = json::parse(viewBody);
     const long long viewCode = viewRoot["code"].asInt(-1);
     if (viewCode != 0) {
-        result.error = std::format(L"视频信息接口返回错误码 {}", viewCode);
+        result.error = apiFailure(L"读取视频信息", viewCode);
         return result;
     }
     // cid lives on the first entry of data.pages; a single-part video also mirrors
@@ -331,7 +348,7 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     const auto playRoot = json::parse(playBody);
     const long long playCode = playRoot["code"].asInt(-1);
     if (playCode != 0) {
-        result.error = std::format(L"播放地址接口返回错误码 {}（可能需要登录或大会员）", playCode);
+        result.error = apiFailure(L"获取播放地址", playCode);
         return result;
     }
 

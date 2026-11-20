@@ -205,6 +205,8 @@ void QmlPlayerBridge::openPath(const QString& path) {
     // a local file would inherit the previous video's second audio track.
     const bool keepBilibiliStream = impl_->bilibiliOpenPending;
     impl_->bilibiliOpenPending = false;
+    const QString biliTitle = impl_->pendingBiliTitle;
+    impl_->pendingBiliTitle.clear();
     endExclusionMove(false);
     impl_->exclusionSelected=-1;
     flushHdrMemory();impl_->hdrTitleApplied.clear();
@@ -228,7 +230,8 @@ void QmlPlayerBridge::openPath(const QString& path) {
     impl_->sourceLabel = wide;
     impl_->liveKind.clear();
     impl_->liveLabel.clear();
-    if(network){impl_->liveKind=QStringLiteral("url");impl_->liveLabel=keepBilibiliStream?QStringLiteral("www.bilibili.com"):QUrl(path).host();}
+    if(network){impl_->liveKind=QStringLiteral("url");impl_->liveLabel=
+        keepBilibiliStream?(biliTitle.isEmpty()?QStringLiteral("www.bilibili.com"):biliTitle):QUrl(path).host();}
     ++impl_->thumbnailGeneration;
     emit thumbnailSourceChanged(network?QString():path);
     emit thumbnailGenerationChanged();
@@ -288,6 +291,7 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         const std::wstring cookie = media::loadBilibiliCookie();
         impl_->biliResolveSignedIn = media::bilibiliCookieLooksSignedIn(cookie);
         impl_->biliResolveBusy = true;
+        impl_->biliResolveGen = impl_->liveOpenGen;
         veyra::log::info("bilibili", std::format("resolving page URL (cookie: {}, qn: {})",
             impl_->biliResolveSignedIn ? "signed in" : "absent", quality));
         impl_->biliResolve = std::async(std::launch::async, [page, cookie, quality] {
@@ -298,6 +302,20 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         return true;
     }
     const QUrl url(trimmed,QUrl::StrictMode);
+    // A Bilibili page this build cannot resolve (bangumi, live, dynamics, a
+    // homepage...) would otherwise go to FFmpeg as if it were a media file and
+    // fail with "cannot open video". Say what is supported instead.
+    if (url.isValid()) {
+        const QString host = url.host().toLower();
+        if (host == QLatin1String("bilibili.com") || host.endsWith(QStringLiteral(".bilibili.com")) ||
+            host == QLatin1String("b23.tv")) {
+            veyra::log::info("bilibili", std::format(
+                "unsupported page host={} (only video/BV pages and b23.tv short links are resolved)",
+                host.toStdString()));
+            emit notice(tr("暂不支持这种 B 站页面，请用视频页（bilibili.com/video/BV…）或 b23.tv 短链"), true);
+            return false;
+        }
+    }
     if(!url.isValid()||url.host().isEmpty()||!media::networkMediaInput(wideOf(url.scheme()+QStringLiteral(":")))){
         emit notice(tr("请输入有效的 HTTP、HTTPS 或 RTSP 视频地址"),true);return false;
     }
@@ -309,6 +327,12 @@ void QmlPlayerBridge::tickBilibiliResolve() {
     if (impl_->biliResolve.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
     const media::BilibiliStream stream = impl_->biliResolve.get();
     impl_->biliResolveBusy = false;
+    if (impl_->biliResolveGen != impl_->liveOpenGen) {
+        // Two API round-trips take a second or two; if the user opened anything
+        // else meanwhile, that is what they want to watch.
+        veyra::log::info("bilibili", "resolved stream dropped: the source has changed since the request");
+        return;
+    }
     if (!stream.ok) {
         veyra::log::warn("bilibili", QString::fromStdWString(stream.error).toStdString());
         emit notice(tr("B 站链接解析失败：%1").arg(QString::fromStdWString(stream.error)), true);
@@ -326,6 +350,9 @@ void QmlPlayerBridge::tickBilibiliResolve() {
     impl_->options.network.userAgent = stream.userAgent;
     impl_->options.audioPath = stream.audioUrl;
     impl_->bilibiliOpenPending = true;
+    // The source label reads this while openPath() runs; a bare CDN host name
+    // tells the user nothing about what is playing.
+    impl_->pendingBiliTitle = QString::fromStdWString(stream.title);
     QString info = QStringLiteral("%1x%2").arg(stream.width).arg(stream.height);
     if (!stream.codec.empty()) info += QStringLiteral(" ") + QString::fromStdWString(stream.codec);
     if (!impl_->biliResolveSignedIn) info += tr("（未登录，画质受限）");
