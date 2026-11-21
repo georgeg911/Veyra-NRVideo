@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace veyra::media {
 
@@ -30,6 +31,13 @@ struct NetworkSettings {
     // has a dedicated option for it: a User-Agent inside the header block is sent
     // twice and the CDN rejects the request.
     std::wstring userAgent;
+    // Alternative CDN addresses for the separate DASH audio track (Bilibili's
+    // backupUrl list). Per-open state like the two fields above, and left out of
+    // operator== for the same reason. The engine rotates through these when the
+    // audio edge it is reading drops the connection: reopening the first address
+    // is what used to fail until the buffering gate gave up and the rest of the
+    // film played silent.
+    std::vector<std::wstring> audioFallbacks;
     bool operator==(const NetworkSettings& other) const {
         return level == other.level && startupPrebufferSeconds == other.startupPrebufferSeconds
             && autoReconnect == other.autoReconnect && timeshiftSeconds == other.timeshiftSeconds && corrupt == other.corrupt;

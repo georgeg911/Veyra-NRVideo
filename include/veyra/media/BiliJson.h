@@ -42,6 +42,13 @@ public:
 
     size_t size() const;                 // array length, or object member count
 
+    // Shape test. Needed where one field is an array in one response and a single
+    // scalar in another (the playurl backupUrl is both, depending on the clip).
+    bool isArray() const { return type_ == Type::Array; }
+    bool isObject() const { return type_ == Type::Object; }
+    bool isString() const { return type_ == Type::String; }
+    bool isNull() const { return type_ == Type::Null; }
+
     // Convenience for the common "array of objects" shape: returns the elements
     // of `*this` when it is an array, otherwise an empty vector.
     std::vector<const Value*> elements() const;

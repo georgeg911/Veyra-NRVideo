@@ -252,6 +252,32 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
         if (base.empty()) base = rendition["base_url"].asString();
         return base;
     };
+    // Every alternative edge the response offers for one rendition. backupUrl is an
+    // array in the web API and occasionally a single string, so both shapes are read.
+    auto backupsOf = [](const json::Value& rendition) {
+        std::vector<std::string> out;
+        const auto& list = rendition["backupUrl"];
+        if (list.isArray()) {
+            for (const auto* entry : list.elements()) {
+                const std::string value = entry->asString();
+                if (!value.empty()) out.push_back(value);
+            }
+        } else {
+            const std::string single = list.asString();
+            if (!single.empty()) out.push_back(single);
+        }
+        const auto& list2 = rendition["backup_url"];
+        if (list2.isArray()) {
+            for (const auto* entry : list2.elements()) {
+                const std::string value = entry->asString();
+                if (!value.empty()) out.push_back(value);
+            }
+        } else {
+            const std::string single = list2.asString();
+            if (!single.empty()) out.push_back(single);
+        }
+        return out;
+    };
     // Prefer H.264; fall back to any codec rather than showing nothing. When the
     // caller asked for a specific qn (the browser bridge following the web player),
     // take that rendition, or the closest lower one if the server omits it.
@@ -300,6 +326,7 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     //    highest bitrate is what the site itself plays.
     {
         std::string bestAudio, bestAudioCodec;
+        std::vector<std::string> bestBackups;
         long long bestBandwidth = -1;
         for (const auto* a : dashArray(playRoot, "audio").elements()) {
             const std::string base = baseUrlOf(*a);
@@ -309,11 +336,22 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
                 bestBandwidth = bandwidth;
                 bestAudio = base;
                 bestAudioCodec = (*a)["codecs"].asString();
+                bestBackups = backupsOf(*a);
             }
         }
         if (!bestAudio.empty()) {
             result.audioUrl = fromUtf8(bestAudio);
             result.audioCodec = fromUtf8(bestAudioCodec);
+            // Keep the mirrors the response offered. The player rotates through them
+            // when an edge drops, instead of reopening the first (dead) address until
+            // the buffering gate gives up and the rest of the film plays silent.
+            for (const auto& backup : bestBackups) {
+                if (backup != bestAudio) result.audioFallbacks.push_back(fromUtf8(backup));
+            }
+            if (!result.audioFallbacks.empty()) {
+                log::info("bilibili", std::format("audio mirrors available={}",
+                                                  result.audioFallbacks.size()));
+            }
         } else {
             log::warn("bilibili", "no DASH audio track in the response; playback would be silent");
         }

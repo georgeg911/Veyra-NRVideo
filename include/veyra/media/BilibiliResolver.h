@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 namespace veyra::media {
 
@@ -40,6 +41,14 @@ struct BilibiliStream {
     std::wstring codec;      // e.g. "avc1.64001F"
     std::wstring audioCodec; // e.g. "mp4a.40.2"
     int quality = 0;         // Bilibili quality id that was selected
+    // The playurl response lists several mirrors for one audio rendition under
+    // backupUrl. They are live CDN edges, not copies, and the API hands the player
+    // all of them precisely so it can move on when one edge stops serving. Playback
+    // used to keep only the first address, so when an edge dropped the connection
+    // mid-film the buffering gate kept reopening the dead address until it gave up
+    // and the rest of the video played silent. Empty when the response carried a
+    // single address; the caller falls back to `audioUrl`.
+    std::vector<std::wstring> audioFallbacks;
 };
 
 // True when `url` looks like a Bilibili video page.

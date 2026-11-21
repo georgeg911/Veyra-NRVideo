@@ -1053,7 +1053,15 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             // arrives as its own address, so that address wins over the shared video
             // session, which carries no audio stream at all.
             const bool separateAudio=!options.audioPath.empty();
-            const std::wstring audioTarget=separateAudio?options.audioPath:path;
+            // Not const: when the CDN edge this address points at drops the connection,
+            // the reconnect path below replaces it with the next mirror the playurl
+            // response listed. Reopening the dead address is what used to fail every
+            // time until the buffering gate gave up and the rest of the film played
+            // silent (field log 2026-11-21, 4K Bilibili HEVC).
+            std::wstring audioTarget=separateAudio?options.audioPath:path;
+            // How many mirrors have been tried since this open, so each reconnect after
+            // the first moves on to a fresh edge instead of repeating the same one.
+            size_t audioMirrorCursor=0;
             // Opening the audio address runs FFmpeg's demuxer, which can throw. Without
             // this guard a failure there escapes into the engine's outer catch and ends
             // the whole session, which is exactly what "bad allocation" was reporting.
@@ -1706,6 +1714,28 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // drifting out of sync.
                     if(gateAction==engine::BufferingGate::Action::Reconnect){
                         const double resumeMs=lastAudioClockMs;
+                        // A DASH audio address is one CDN edge out of several the playurl
+                        // response listed. When an edge drops, reopening the same address
+                        // fails every time - the gate then gives up and the picture plays
+                        // on in silence. Rotate to the next mirror instead, keeping the
+                        // original address as the last resort (a mirror list is a hint,
+                        // not a guarantee, and a transient wobble on the first edge is
+                        // still best answered by the address that was working).
+                        // The audio clock is still the reference and the seek below is
+                        // unchanged: the sound resumes at the media time the picture is
+                        // showing, so A/V stays aligned across the swap.
+                        const auto& mirrors=options.network.audioFallbacks;
+                        if(!mirrors.empty()&&separateAudio){
+                            const size_t pick=audioMirrorCursor%mirrors.size();
+                            const std::wstring& candidate=mirrors[pick];
+                            ++audioMirrorCursor;
+                            if(!candidate.empty()&&candidate!=audioTarget){
+                                veyra::log::warn("buffering-gate",std::format(
+                                    "audio edge switch: mirror {}/{} (previous target {})",
+                                    pick+1,mirrors.size(),audioTarget.size()));
+                                audioTarget=candidate;
+                            }
+                        }
                         veyra::log::warn("buffering-gate",std::format(
                             "reopening the audio address (attempt {}) at {:.0f} ms",bufferingGate.reconnects(),resumeMs));
                         audioPipe.stopThread();
@@ -1729,6 +1759,46 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             veyra::log::info("buffering-gate",std::format(
                                 "audio reopened; continuing at {:.0f} ms (the picture follows the sound)",resumeMs));
                         }else{
+                            // The reconnect budget is two, but the playurl response can
+                            // list more edges than that. Walk the remaining mirrors in
+                            // place before declaring the session silent: each attempt is
+                            // one demux open, and the sound is already gone by now, so
+                            // spending them costs nothing the user would notice.
+                            const auto& remaining=options.network.audioFallbacks;
+                            bool recoveredByMirror=false;
+                            if(separateAudio&&!remaining.empty()){
+                                for(size_t extra=0;extra<remaining.size()&&!recoveredByMirror;++extra){
+                                    const size_t pick=(audioMirrorCursor+extra)%remaining.size();
+                                    const std::wstring& candidate=remaining[pick];
+                                    if(candidate.empty()||candidate==audioTarget)continue;
+                                    bool mirrorOpened=false;
+                                    try{
+                                        mirrorOpened=audioPipe.open(candidate,&stop_,
+                                            options.network.requestHeaders,options.network.userAgent);
+                                    }catch(const std::exception& e){
+                                        veyra::log::error("buffering-gate",std::format(
+                                            "audio mirror {} threw: {}",pick+1,e.what()));
+                                    }
+                                    if(!mirrorOpened)continue;
+                                    audioTarget=candidate;
+                                    audioPipe.holdForVideo();audioPipe.startThread(&audio,true);
+                                    {
+                                        std::lock_guard lock(mutex_);
+                                        snapshot_.audioTracks=audioPipe.tracks();
+                                        snapshot_.selectedAudioTrack=audioPipe.selectedTrack();
+                                        snapshot_.audioAvailable=true;
+                                    }
+                                    if(std::isfinite(resumeMs)&&resumeMs>0.0)(void)audioPipe.requestSeek(resumeMs);
+                                    audioGateWasHolding=false;
+                                    recoveredByMirror=true;
+                                    veyra::log::info("buffering-gate",std::format(
+                                        "audio recovered on mirror {}/{}; continuing at {:.0f} ms",
+                                        pick+1,remaining.size(),resumeMs));
+                                }
+                            }
+                            if(recoveredByMirror){
+                                watchdog_->beat();
+                            }else{
                             veyra::log::error("buffering-gate","audio address could not be reopened");
                             // 重连也失败：这次会话没有可用的声音了。把音频从时钟与闸门里摘掉，
                             // 否则水位恒为 0，闸门会永远保持，用户点播放只看到冻结的画面。
@@ -1740,6 +1810,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             {
                                 std::lock_guard lock(mutex_);
                                 snapshot_.audioAvailable=false;   // 界面上也不要再声称有声音
+                            }
                             }
                         }
                     }

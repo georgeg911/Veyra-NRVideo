@@ -1063,6 +1063,10 @@ inline void clearSiteStream(engine::PlayerOptions& options) {
     options.audioPath.clear();
     options.network.requestHeaders.clear();
     options.network.userAgent.clear();
+    // The mirror list belongs to the same resolved stream: leaving it behind would
+    // let a later audio reconnect (on a local file or a capture card) swap in a
+    // Bilibili CDN address that has nothing to do with what is playing.
+    options.network.audioFallbacks.clear();
 }
 
 } // namespace veyra::ui

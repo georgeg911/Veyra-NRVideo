@@ -61,7 +61,7 @@ struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t f
         PlayerOptions o;o.nr=s.nr;o.sr=s.sr;o.fg=s.multiplier>1;o.fgMultiplier=std::max(2u,s.multiplier);o.realtime=s.nrPolicy!=pipeline::NrSizePolicy::Native;o.settings=s;o.nodeOrder=order;
         // Per-open state that EnhancementSettings does not carry: a rebuild would
         // otherwise drop the DASH audio address and the site's request headers.
-        if(keep){o.audioPath=keep->audioPath;o.network.requestHeaders=keep->network.requestHeaders;o.network.userAgent=keep->network.userAgent;}
+        if(keep){o.audioPath=keep->audioPath;o.network.requestHeaders=keep->network.requestHeaders;o.network.userAgent=keep->network.userAgent;o.network.audioFallbacks=keep->network.audioFallbacks;}
         return o;}
 };
 enum class TransportState { Empty, Opening, Playing, Paused, Ended, Stopping, Failed };

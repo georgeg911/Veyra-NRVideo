@@ -450,6 +450,10 @@ void QmlPlayerBridge::tickBilibiliResolve() {
     impl_->options.network.requestHeaders = stream.headers;
     impl_->options.network.userAgent = stream.userAgent;
     impl_->options.audioPath = stream.audioUrl;
+    // The playurl response lists several live CDN edges for the same audio
+    // rendition. Hand them to the engine so a dropped edge is replaced instead of
+    // reopening the dead one until the buffering gate gives up.
+    impl_->options.network.audioFallbacks = stream.audioFallbacks;
     impl_->bilibiliOpenPending = true;
     // The source label reads this while openPath() runs; a bare CDN host name
     // tells the user nothing about what is playing.
