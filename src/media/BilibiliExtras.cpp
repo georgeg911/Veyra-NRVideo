@@ -126,6 +126,11 @@ std::string signWbi(std::map<std::string, std::string>& params, const std::wstri
     auto& k = wbiKeys();
     if (k.imgKey.empty() || GetTickCount64() - k.fetchedAt > 3600ull * 1000) refreshWbiKeys(cookie);
     const std::string mixin = mixinKey();
+    // Custom: an empty mixin means the nav round-trip failed (not signed in, network
+    // error, or a changed key layout). Signing with it produces a w_rid the server
+    // rejects, which used to surface as "字幕列表错误码 -403" or - worse - as
+    // "this video has no CC". Report the real cause instead.
+    if (mixin.empty()) return {};
     const int64_t wts = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     params["wts"] = std::to_string(wts);
@@ -261,7 +266,17 @@ bool fetchBiliDanmaku(long long cid, std::vector<BiliDanmaku>& out, std::wstring
     std::string body;
     if (!httpGet(L"comment.bilibili.com", path, kReferer, L"", body, error)) return false;
     if (body.empty()) { error = L"弹幕为空"; return false; }
-    if (body.find("<d ") == std::string::npos) { error = L"弹幕数据格式异常"; return false; }
+    // Custom: a part with no comments still returns a valid document -
+    // "<i><chatserver>...</chatserver><maxlimit>...</maxlimit></i>" with no <d>
+    // elements. Treating that as "格式异常" made an empty track look like a parse
+    // failure; the subtitle contract is the same ("no tracks is not an error").
+    if (body.find("<d ") == std::string::npos) {
+        if (body.find("<i>") != std::string::npos && body.find("</i>") != std::string::npos) {
+            return true;   // legal, just empty
+        }
+        error = L"弹幕数据格式异常";
+        return false;
+    }
 
     size_t pos = 0;
     while (true) {

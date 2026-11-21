@@ -177,9 +177,15 @@ private:
     pipeline::DoviExpansionPlan doviPlan_{}, doviPreviousPlan_{};
     bool doviPlanTemporal_ = false;
     std::chrono::steady_clock::time_point doviPlanStamp_{};
-    // One small upload buffer per frame queued; the presentation ring holds three
-    // lists, so a fourth slot is never still being read when it is rewritten.
-    static constexpr unsigned kDoviTableSlots = 4;
+    // One small upload buffer per frame queued. The slot count must cover the
+    // deepest command ring either present path can queue:
+    //   presentationRing_ (no XeSS): 3 command lists
+    //   sharedRing       (XeSS on): EngineController/PreviewGpuSession initialise 16
+    // Four slots was enough for the first path only; on the XeSS path a frame four
+    // back can still be queued, so rewriting its slot changed the table a GPU-side
+    // frame was about to read (wrong-scene highlight gate, visible as flicker).
+    // 17 = 16 + 1 so a slot is never rewritten while its previous user is in flight.
+    static constexpr unsigned kDoviTableSlots = 17;
     // 1328 bytes of data (83 float4s: 257 expansion + 65 hue + 3 colour scalars,
     // padded to float4). The slot stride must be a multiple of 256 because a root
     // CBV's address is a constant-buffer address and D3D12 requires

@@ -74,20 +74,29 @@ bool httpGet(const std::wstring& host, const std::wstring& path, const std::wstr
                                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
                 WinHttpReceiveResponse(request, nullptr)) {
                 DWORD status = 0, len = sizeof(status);
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
-                if (status == 200) {
+                const bool haveStatus = WinHttpQueryHeaders(
+                    request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX) != FALSE;
+                if (!haveStatus) {
+                    error = L"没有返回状态码";
+                } else if (status == 200) {
+                    // Custom: a failed read mid-body used to fall through to ok=true,
+                    // so a truncated JSON/XML response was reported as success and then
+                    // surfaced as a confusing "错误码 -1" or a silently short danmaku
+                    // track. Only a clean end of body counts as success now.
                     DWORD available = 0;
+                    bool readFailed = false;
                     do {
                         available = 0;
-                        if (!WinHttpQueryDataAvailable(request, &available)) break;
+                        if (!WinHttpQueryDataAvailable(request, &available)) { readFailed = true; break; }
                         if (available == 0) break;
                         std::string chunk(available, '\0');
                         DWORD read = 0;
-                        if (!WinHttpReadData(request, chunk.data(), available, &read)) break;
+                        if (!WinHttpReadData(request, chunk.data(), available, &read)) { readFailed = true; break; }
                         body.append(chunk.data(), read);
                     } while (available > 0);
-                    ok = true;
+                    if (readFailed) error = L"响应读取中断（内容不完整）";
+                    else ok = true;
                 } else {
                     error = std::format(L"HTTP {}", status);
                 }
@@ -117,25 +126,42 @@ bool httpFollowLocation(const std::wstring& host, const std::wstring& path,
                                                WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                                WINHTTP_FLAG_SECURE);
         if (request) {
+            // Custom: WinHTTP follows redirects by default, so WinHttpReceiveResponse
+            // would land on the final 200 page and the Location header of the 302
+            // would already be gone - which is exactly why every b23.tv link failed
+            // here with "短链没有返回跳转地址". Turn automatic redirection off and
+            // read the 3xx response ourselves.
+            DWORD disable = WINHTTP_DISABLE_REDIRECTS;
+            WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
             WinHttpAddRequestHeaders(request, (L"User-Agent: " + std::wstring(kUserAgent)).c_str(), -1L,
                                      WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
             if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
                 WinHttpReceiveResponse(request, nullptr)) {
-                DWORD size = 0;
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
-                                    nullptr, &size, WINHTTP_NO_HEADER_INDEX);
-                if (size > sizeof(wchar_t)) {
-                    std::wstring value(size / sizeof(wchar_t) + 1, L'\0');
-                    if (WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION,
-                                            WINHTTP_HEADER_NAME_BY_INDEX, value.data(), &size,
-                                            WINHTTP_NO_HEADER_INDEX)) {
-                        value.resize(wcslen(value.c_str()));
-                        location = value;
-                        ok = !location.empty();
+                DWORD status = 0, statusSize = sizeof(status);
+                const bool haveStatus = WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                                                            WINHTTP_NO_HEADER_INDEX) != FALSE;
+                if (!haveStatus) {
+                    error = L"短链请求没有返回状态码";
+                } else if (status < 300 || status >= 400) {
+                    error = std::format(L"短链返回 {}，不是跳转响应", status);
+                } else {
+                    DWORD size = 0;
+                    WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                                        nullptr, &size, WINHTTP_NO_HEADER_INDEX);
+                    if (size > sizeof(wchar_t)) {
+                        std::wstring value(size / sizeof(wchar_t) + 1, L'\0');
+                        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION,
+                                                WINHTTP_HEADER_NAME_BY_INDEX, value.data(), &size,
+                                                WINHTTP_NO_HEADER_INDEX)) {
+                            value.resize(wcslen(value.c_str()));
+                            location = value;
+                            ok = !location.empty();
+                        }
                     }
+                    if (!ok) error = std::format(L"短链的 {} 响应里没有 Location", status);
                 }
-                if (!ok) error = L"短链没有返回跳转地址";
             } else {
                 error = L"请求失败";
             }

@@ -76,7 +76,9 @@ float DoviColorRestraint(float3 nits, float masterNits)
     const float gate = smoothstep(0.0, 0.15, length(float2(ct, cp)) / intensity);
     const float z = saturate(intensity / DoviPq(masterNits));
     const float pos = (atan2(cp, ct) + 3.14159265) / 6.2831853 * 64.0;
-    const int idx = min(int(pos), 63);
+    // clamp, not min: atan2 can return NaN for (0,0) input, and min() would keep a
+    // negative index that reads doviHue out of bounds. idx+1 below needs 0..63.
+    const int idx = clamp(int(pos), 0, 63);
     const float frac = saturate(pos - float(idx));
     const float hue = lerp(DoviHueAt(idx), DoviHueAt(idx + 1), frac);
     const float severity = doviColor.x * abs(2.0 * z - 1.0) + doviColor.y + hue;
@@ -98,9 +100,15 @@ float DoviExtraAt(int k)
 float3 DoviExpand(float3 nits, float4 dvp)
 {
     const float y = dot(nits, float3(.2627, .6780, .0593));
-    if (y <= 10.0 || dvp.x <= 10.0) return nits;
+    // Custom: the negated comparisons are the NaN-safe form. "y <= 10.0" is false
+    // for NaN, so a NaN pixel (16F working texture, FG/NR/XeSS upstream may produce
+    // one) would fall through, saturate(NaN) is undefined, and int(u) can be negative
+    // - which indexes the b1 constant buffer out of bounds. "!(y > 10.0)" is true for
+    // NaN and returns early, exactly like the CPU reference in DoviEnhancedCurve.h.
+    if (!(y > 10.0) || !(dvp.x > 10.0)) return nits;
     const float u = saturate((y - 10.0) / max(dvp.x - 10.0, 1e-3)) * 256.0;
-    const int index = min(int(u), 255);
+    // clamp, not min: min() would keep a negative index if u ever came out negative.
+    const int index = clamp(int(u), 0, 255);
     float extra = lerp(DoviExtraAt(index), DoviExtraAt(index + 1), u - float(index));
     if (!(extra > 0.0)) return nits;
     // Custom (完整 C): CB1 applies the colour gate before the soft knee.

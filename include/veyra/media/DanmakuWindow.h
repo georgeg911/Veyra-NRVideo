@@ -15,6 +15,16 @@ namespace veyra::media {
 
 class DanmakuWindow {
 public:
+    // Custom: destroy() has to run from the destructor. The unique_ptr owner in
+    // QmlPlayerBridge_p.h never calls it explicitly, so without this the window,
+    // its HDC, its DIB section and the "danmaku.error" window property all leaked
+    // for the lifetime of the process (bounded today, but a real leak the moment the
+    // overlay is ever rebuilt for a new window).
+    DanmakuWindow() = default;
+    ~DanmakuWindow() { destroy(); }
+    DanmakuWindow(const DanmakuWindow&) = delete;
+    DanmakuWindow& operator=(const DanmakuWindow&) = delete;
+
     // `parent` is the video window. Returns false when the window cannot be made.
     bool create(HWND parent);
     void destroy();

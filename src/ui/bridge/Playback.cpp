@@ -408,7 +408,24 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
 void QmlPlayerBridge::tickBilibiliResolve() {
     if (!impl_->biliResolveBusy) return;
     if (impl_->biliResolve.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
-    const BilibiliBundle bundle = impl_->biliResolve.get();
+    // Custom: .get() rethrows anything the worker raised (bad_alloc, format_error in
+    // the danmaku/subtitle stage that the inner try/catch does not cover). Letting it
+    // escape a Qt timer callback terminates the process, and biliResolveBusy would
+    // stay true so no later resolve could ever run.
+    BilibiliBundle bundle;
+    try {
+        bundle = impl_->biliResolve.get();
+    } catch (const std::exception& e) {
+        impl_->biliResolveBusy = false;
+        veyra::log::error("bilibili", std::format("resolution threw: {}", e.what()));
+        emit notice(tr("B 站链接解析出错：%1").arg(QString::fromUtf8(e.what())), true);
+        return;
+    } catch (...) {
+        impl_->biliResolveBusy = false;
+        veyra::log::error("bilibili", "resolution threw an unknown exception");
+        emit notice(tr("B 站链接解析出错"), true);
+        return;
+    }
     impl_->biliResolveBusy = false;
     const media::BilibiliStream& stream = bundle.stream;
     if (impl_->biliResolveGen != impl_->liveOpenGen) {

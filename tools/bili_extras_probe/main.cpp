@@ -11,13 +11,30 @@
 namespace {
 std::wstring widen(const char* s) {
     const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
-    std::wstring out(n > 1 ? size_t(n - 1) : 0, L'\0');
-    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, out.data(), n);
+    if (n <= 1) return {};
+    // MultiByteToWideChar counts the terminator in n; the buffer must be n wide
+    // because that is also what the second call is told to fill. The old code
+    // allocated n-1 and passed n, writing one wchar past the string's end.
+    std::wstring out(size_t(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, out.data(), n);
+    out.resize(size_t(n - 1));
     return out;
+}
+
+// The CRT's "C" locale cannot convert %ls, so Chinese error text was silently
+// swallowed and every failure printed an empty line. Emit UTF-8 instead.
+void printWide(const wchar_t* text) {
+    const int need = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (need <= 1) return;
+    std::string utf8(size_t(need), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8.data(), need, nullptr, nullptr);
+    utf8.resize(size_t(need - 1));
+    std::printf("%s", utf8.c_str());
 }
 } // namespace
 
 int main(int argc, char** argv) {
+    SetConsoleOutputCP(CP_UTF8);
     if (argc < 2) { std::printf("usage: bili_extras_probe <page-url>\n"); return 2; }
     const std::wstring page = widen(argv[1]);
     const std::wstring cookie = veyra::media::loadBilibiliCookie();
@@ -26,7 +43,9 @@ int main(int argc, char** argv) {
 
     const auto stream = veyra::media::resolveBilibiliStream(page, cookie);
     if (!stream.ok) {
-        std::printf("resolve FAILED: %ls\n", stream.error.c_str());
+        std::printf("resolve FAILED: ");
+        printWide(stream.error.c_str());
+        std::printf("\n");
         return 1;
     }
     std::printf("resolved: %ux%u aid=%lld cid=%lld qn=%d\n",

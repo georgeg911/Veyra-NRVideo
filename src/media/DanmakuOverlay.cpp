@@ -253,7 +253,11 @@ int DanmakuEngine::draw(HDC hdc, int width, int height, double seconds,
     const double usableHeight = height * (view.area > 0 ? view.area : 0.5);
     const int tracks = std::max(1, int(usableHeight / trackHeight));
     const BYTE alpha = BYTE(std::lround(std::clamp(view.opacity, 0.05, 1.0) * 255.0));
-    const float drawScale = float(fontSize) / float(kFontPixels);
+    // Custom: the sprite is already rasterised at `fontSize` (see spriteFor ->
+    // rasterSize = spriteFontSize_), so scaling it again by fontSize/kFontPixels
+    // squared the user's choice: 75% rendered as 56% and 125% as 156%, and the "large"
+    // setting overlapped tracks because trackHeight only grows linearly. Draw 1:1.
+    const float drawScale = 1.0f;
 
     // Pre-rasterise what is about to appear. Without this the frame that first shows
     // a comment pays its text layout cost, which is 10 ms or more when several new
