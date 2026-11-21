@@ -343,6 +343,12 @@ struct QmlPlayerBridge::Impl {
     // Title of the resolved video, handed from the worker result to the openPath()
     // that consumes it so the source label can show the video instead of a host name.
     QString pendingBiliTitle;
+    // The page address the user actually entered, and the quality they asked for.
+    // lastSource stores these instead of the resolved CDN address: the CDN address
+    // carries a signature that expires, so replaying it on the next launch fails,
+    // while re-resolving the page always yields a fresh one.
+    QString pendingBiliPage;
+    int pendingBiliQuality = 0;
     // Set between "stream resolved" and the resulting openPath(): openPath must
     // keep the DASH audio address and the request headers for this one open.
     bool bilibiliOpenPending = false;

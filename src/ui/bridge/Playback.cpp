@@ -294,7 +294,13 @@ void QmlPlayerBridge::openPath(const QString& path) {
     // 1x1 swapchain.
     if (impl_->currentPage.isEmpty() || impl_->currentPage == QLatin1String("home"))
         emit navigate(QStringLiteral("pro"));
-    if(!network)rememberSource(QStringLiteral("file"), path);
+    // A veyra:// URL is an instruction for this program, not a file and not a media
+    // address: FFmpeg has no such protocol, so replaying it on the next launch failed
+    // with "Protocol not found" (five times in the 2026-11-21 field log). The protocol
+    // handler already resolved the real address by the time openPath runs, so what is
+    // worth remembering is that resolved address, not the shell of the request.
+    const bool protocolRequest = path.startsWith(QStringLiteral("veyra://"), Qt::CaseInsensitive);
+    if(!network && !protocolRequest) rememberSource(QStringLiteral("file"), path);
     if (impl_->preOpen) impl_->preOpen();
     auto options = impl_->options;
     if (!keepBilibiliStream) {
@@ -346,6 +352,11 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         impl_->biliResolveGen = impl_->liveOpenGen;
         const bool wantDanmaku = impl_->prefBool("biliDanmaku", false);
         const bool wantSubtitles = impl_->prefBool("biliSubtitles", false) && !cookie.empty();
+        // Stash the page address for tickBilibiliResolve: that is where the stream is
+        // finally accepted, and it is the page (resolvable again later) that belongs in
+        // lastSource rather than the CDN address, whose signature expires.
+        impl_->pendingBiliPage = trimmed;
+        impl_->pendingBiliQuality = quality;
         // zh / en / both; the extras fall back to the other language when a video
         // only carries one of them.
         const QString langPref = impl_->prefString("biliSubtitleLang");
@@ -462,6 +473,21 @@ void QmlPlayerBridge::tickBilibiliResolve() {
     if (!stream.codec.empty()) info += QStringLiteral(" ") + QString::fromStdWString(stream.codec);
     if (!impl_->biliResolveSignedIn) info += tr("（未登录，画质受限）");
     emit notice(tr("正在播放：%1  %2").arg(QString::fromStdWString(stream.title), info), false);
+    // Remember the page and quality, not the CDN address. A resolved stream address
+    // carries a signature that expires within the hour, so replaying it on the next
+    // launch would fail; the page can always be resolved again. "url" is its own kind
+    // so resumeLastSource routes it back through openNetworkAddress (the resolver)
+    // instead of handing it to FFmpeg as a file.
+    {
+        QVariantMap value{{"kind", "url"}, {"label", impl_->pendingBiliPage},
+                          {"quality", impl_->pendingBiliQuality}};
+        if (!impl_->pendingBiliPage.isEmpty() &&
+            impl_->prefs.value(QStringLiteral("lastSource")).toMap() != value) {
+            impl_->prefs[QStringLiteral("lastSource")] = value;
+            if (!impl_->savePrefs()) veyra::log::warn("ui-prefs", "last source not saved");
+            emit preferencesChanged();
+        }
+    }
     openPath(QString::fromStdWString(stream.url));
     // The overlays go on after the open: openPath() replaces the subtitle tracks,
     // so installing the site's CC track before it would be thrown away.

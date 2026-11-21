@@ -476,6 +476,18 @@ void QmlPlayerBridge::resumeLastSource() {
         emit navigate(QStringLiteral("screen"));
         return;
     }
+    // Custom: a site page (Bilibili) is remembered as the page address, not as the
+    // CDN address it resolved to - the CDN address carries a signature that expires
+    // within the hour, so replaying it would 403. Going through openNetworkAddress
+    // runs the resolver again and gets a fresh stream.
+    if (kind == QLatin1String("url")) {
+        const QString label = last.value(QStringLiteral("label")).toString();
+        if (!label.isEmpty()) {
+            const int quality = last.value(QStringLiteral("quality")).toInt();
+            openNetworkAddress(label, quality);
+            return;
+        }
+    }
     emit notice(tr("还没有可以继续的片源"), true);
 }
 
