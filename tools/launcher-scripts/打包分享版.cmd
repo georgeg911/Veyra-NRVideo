@@ -27,11 +27,11 @@ if exist "%OUT%" (
 )
 
 echo 正在复制，请稍候（约 1.1 GB，含 NVIDIA/AMD/Intel 运行时）...
+rem /XD 必须用相对源目录的路径：给绝对路径时 robocopy 不匹配，logs 会被漏进去。
+rem /XD 要用纯目录名（不带路径）：写 "runtime_local\user-data-2.0.0" 时 robocopy 不匹配，
+rem 会把个人设置、播放历史和 1 GB 翻译资产一起打进分享包。
 robocopy "%~dp0." "%OUT%" /E /NFL /NDL /NJH /NJS /NP ^
-  /XD "%~dp0runtime_local\user-data-2.0.0" ^
-      "%~dp0runtime_local\user-data-2.0.0-author" ^
-      "%~dp0runtime_local\user-data-2.0.0-p5" ^
-      "%~dp0logs" ^
+  /XD "logs" "user-data-2.0.0" "user-data-2.0.0-author" "user-data-2.0.0-p5" ^
   /XF "*.dmp" "*.log"
 
 if errorlevel 8 (
