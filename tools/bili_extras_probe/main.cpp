@@ -50,6 +50,18 @@ int main(int argc, char** argv) {
     }
     std::printf("resolved: %ux%u aid=%lld cid=%lld qn=%d\n",
                 stream.width, stream.height, stream.aid, stream.cid, stream.quality);
+    // Diagnostic: the resolved addresses, so a CDN probe can be pointed at exactly
+    // the audio edge the player would have opened.
+    std::printf("video_url: ");
+    printWide(stream.url.c_str());
+    std::printf("\naudio_url: ");
+    printWide(stream.audioUrl.c_str());
+    std::printf("\naudio_mirrors: %zu\n", stream.audioFallbacks.size());
+    for (size_t i = 0; i < stream.audioFallbacks.size(); ++i) {
+        std::printf("  mirror[%zu]: ", i);
+        printWide(stream.audioFallbacks[i].c_str());
+        std::printf("\n");
+    }
 
     std::vector<veyra::media::BiliDanmaku> danmaku;
     std::wstring error;
