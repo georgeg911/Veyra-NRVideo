@@ -97,13 +97,60 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 
 ### 4.3 增量构建（日常）
 
+用项目自带的脚本（满核并行）：
+
 ```bat
-@echo off
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
-"C:\Program Files\CMake\bin\cmake.exe" --build D:\Program\Veyra\build-release -j 8
+D:\Program\Veyra\src\scripts\build-local.cmd
 ```
 
-约 10 秒（只改一两个文件时）到 15 分钟（全量）。
+它做的事就是：
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+"C:\Program Files\CMake\bin\cmake.exe" --build D:\Program\Veyra\build-release -j 16
+```
+
+**`-j 16` 是满核**（本机 16 逻辑核）。以前用 `-j 8` 只用了一半，全量慢一倍。
+
+**真实耗时**（本机实测，RTX 5080 / 16 核）：
+
+| 场景 | 编译步数 | 耗时 |
+|---|---|---|
+| 无改动 | 5 | **3 秒** |
+| 改 20 个 `.cpp` | 142 | **16 秒** |
+| 改 1 个被广泛引用的头文件 | 224 | **66 秒** |
+| 全量重建 | ~700 | 约 2-3 分钟 |
+
+### 4.3.1 绝对不要把构建输出接管道
+
+**这是踩过的坑**：用 `build.cmd | grep ... | head` 时，`head` 拿够行数就退出，但上游 `cmd.exe` 还在写 stdout，管道缓冲区满后阻塞，**批处理看起来永远跑不完**。实测编译早在 14:28:58 就完成了，命令却卡到 14:33 还在"等待"。
+
+正确做法：
+
+```powershell
+# 输出重定向到文件，前台等待
+cmd /c D:\Program\Veyra\src\scripts\build-local.cmd > D:\DSH\.dsh-tmp\build.log 2>&1
+# 编译完再读文件
+Get-Content D:\DSH\.dsh-tmp\build.log -Tail 20
+```
+
+**判断编译是否结束，看 exe 时间戳，不要看命令状态**：
+
+```powershell
+(Get-Item D:\Program\Veyra\build-release\veyra_qml_ui.exe).LastWriteTime
+```
+
+### 4.3.2 改头文件会触发大面积重编
+
+改了被广泛 include 的头文件（`FramePacket.h`、`VideoPresenter.h`、`QmlPlayerBridge_p.h` 等），会连锁重编几十上百个 `.cpp`，这是 C++ 的固有代价，无法避免。
+
+**所以：把同一批改动攒完再编译一次，不要边改边编。**
+
+| 改动类型 | 触发范围 | 建议 |
+|---|---|---|
+| 只改 `.cpp` | 1-20 个文件 | 随时编（10-20 秒） |
+| 改 HLSL | 重新 dxc 编所有 shader | 攒着一起改 |
+| 改头文件 | 几十到几百个文件 | **攒完所有改动再一次编** |
 
 ### 4.4 什么时候必须全量重建
 
