@@ -336,15 +336,42 @@ void AudioPipeline::readerLoop()
                 // A track that cannot be read is now just closed: video keeps playing
                 // silently and no thread is blocked.
                 if(++readFailureRun_>=40){
-                    readFailureRun_=0;
-                    const double last=lastGoodReadMs_.load();
-                    const double total=fmt_&&fmt_->duration!=AV_NOPTS_VALUE?double(fmt_->duration)/1000.0:-1.0;
-                    log::warn("audio", std::format(
-                        "audio unreadable at {:.0f} ms of {:.0f} ms; closing the track",
-                        last, total));
-                    readerEof_=true;
-                    readRetrying_=false;
-                    readRetryingSince_={};
+                    // 网络源不能这么快关掉音轨：40 次 × 5 ms ≈ 0.2 秒，断网/切 Wi-Fi 的
+                    // 抖动都会命中，而音轨一关就置 readerEof_ → decodedEof_ →
+                    // 「音频已结束」，引擎的 BufferingGate 看到 audioAvailable=false 就
+                    // 根本不进入「保持/重连」分支，于是声音永久消失、只有手动 seek 能救。
+                    // 现场 2026-11-22 复现：拔网线 0.216 秒后 "closing the track"，之后
+                    // 一直静音。
+                    // 网络源改成「持续重试」：不关音轨、不置 EOF，只按秒退避地重试读取，
+                    // 让引擎把这当成「缓冲耗尽」去重连；真的恢复不了时由用户 seek 或
+                    // 重开片源处理。
+                    // A network track must not be closed this fast: 40 x 5 ms is 0.2 s, so
+                    // any Wi-Fi blip qualifies, and closing it sets readerEof_ -> decodedEof_
+                    // -> "audio finished". BufferingGate then sees audioAvailable=false and
+                    // never enters its hold/reconnect branch, so the sound is gone for good
+                    // and only a manual seek brings it back (reproduced 2026-11-22: 0.216 s
+                    // after pulling the cable, "closing the track", silence from then on).
+                    // For a network target, keep retrying instead: leave the track open and
+                    // do not raise EOF, so the engine treats this as "buffer ran dry" and
+                    // reconnects. If it never recovers the user seeks or reopens the source.
+                    const bool networkRead = networkTarget_ || session_;
+                    if(!networkRead){
+                        readFailureRun_=0;
+                        const double last=lastGoodReadMs_.load();
+                        const double total=fmt_&&fmt_->duration!=AV_NOPTS_VALUE?double(fmt_->duration)/1000.0:-1.0;
+                        log::warn("audio", std::format(
+                            "audio unreadable at {:.0f} ms of {:.0f} ms; closing the track",
+                            last, total));
+                        readerEof_=true;
+                        readRetrying_=false;
+                        readRetryingSince_={};
+                        continue;
+                    }
+                    // 网络源：退避到 50 ms 一次，继续重试；不关音轨。
+                    // Network target: back off to one attempt per 50 ms and keep trying.
+                    lock.unlock();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    lock.lock();
                     continue;
                 }
                 // 限流：每 5ms 重试一次，全打出来就是每秒 200 条日志。
