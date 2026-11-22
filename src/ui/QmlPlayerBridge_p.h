@@ -348,6 +348,10 @@ struct QmlPlayerBridge::Impl {
     // carries a signature that expires, so replaying it on the next launch fails,
     // while re-resolving the page always yields a fresh one.
     QString pendingBiliPage;
+    // Set when the browser extension already supplied the part list (with the page's
+    // own titles). The resolver then skips its own API-derived queueing, so the same
+    // addresses are not added twice under plainer names.
+    bool webPartsQueued = false;
     int pendingBiliQuality = 0;
     // Set between "stream resolved" and the resulting openPath(): openPath must
     // keep the DASH audio address and the request headers for this one open.

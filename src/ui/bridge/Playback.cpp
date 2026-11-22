@@ -2,7 +2,11 @@
 #include "../QmlPlayerBridge_p.h"
 #include "../LiveTranslation.h"
 
+#include <QTimer>
+#include <QUrlQuery>
 #include <algorithm>
+#include <functional>
+#include <memory>
 #include <cmath>
 #include <regex>
 #include "veyra/pipeline/NrReuse.h"
@@ -207,7 +211,9 @@ void QmlPlayerBridge::tickPlaylist() {
     const auto& s = impl_->snapshot;
     using T = engine::TransportState;
     if (!impl_->playlistSession) return;
-    if (!impl_->liveKind.isEmpty() || utf8Of(impl_->sourceLabel) != impl_->playlistPath) {
+    // liveKind is "url" for a site page as well, so a non-empty liveKind alone cannot
+    // mean "not a playlist source" - it is the source label that has to match the row.
+    if (utf8Of(impl_->sourceLabel) != impl_->playlistPath) {
         impl_->playlistSession = 0; impl_->playlist->setPlayback({}, {}); return;
     }
     if (s.sessionId != impl_->playlistSession) return; // Ignore old session snapshots after open.
@@ -237,6 +243,26 @@ void QmlPlayerBridge::tickPlaylist() {
 
 void QmlPlayerBridge::openPath(const QString& path) {
     if (path.isEmpty()) return;
+    // A veyra:// request is an instruction for this program, not a file: FFmpeg has no
+    // such protocol and failed with "Protocol not found". The protocol handler has
+    // already turned the real page address into an open by the time this runs, so the
+    // only correct thing here is to refuse it and let the handler do its job.
+    if (path.startsWith(QLatin1String("veyra://"), Qt::CaseInsensitive)) {
+        veyra::log::warn("ui-open", "ignoring a veyra:// address passed to openPath");
+        return;
+    }
+    // A playlist entry can now be a site page: a multi-part Bilibili video puts one
+    // URL per part in the list so the series plays through. Those have to go through
+    // the resolver - FFmpeg has no idea what an HTML page is. Checked here as well as
+    // at the call sites because a page URL can arrive from the playlist, the recent
+    // list or the command line.
+    if (path.startsWith(QLatin1String("http://"), Qt::CaseInsensitive) ||
+        path.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)) {
+        if (media::isBilibiliPageUrl(path.toStdWString())) {
+            openNetworkAddress(path, 0);
+            return;
+        }
+    }
     impl_->screenCropPreview = false;
     // A resolved Bilibili stream keeps its DASH audio address and the CDN's
     // Referer/UA for exactly this one open. Anything else must start clean, or
@@ -320,7 +346,14 @@ void QmlPlayerBridge::openPath(const QString& path) {
     options.network.corrupt=media::corruptPolicyFromId(impl_->prefString("networkCorrupt").toStdString());
     impl_->engine.open(impl_->videoWindow, wide, options);
     impl_->openingSessionId = impl_->engine.snapshot().sessionId;
-    impl_->playlistSession = network?0:impl_->openingSessionId;
+    // Network sources were excluded from playlist state tracking because a network URL
+    // may be a live stream, and a live stream has no meaningful "playing this row"
+    // state. A site page (a Bilibili video, now also a playlist entry per part) is a
+    // network address too, and it does need the state: tickPlaylist() drives both the
+    // "正在播放" badge and the row highlight, so without this the list never showed
+    // which part was on. Exclude only the URLs that are really live.
+    const bool liveSource = network && !media::isBilibiliPageUrl(wide);
+    impl_->playlistSession = liveSource ? 0 : impl_->openingSessionId;
     impl_->resumeSession = 0;
     if ((impl_->prefBool("rememberPosition", true)||impl_->prefBool("autoResume",false))) {
         const auto saved = impl_->prefs.value("positions").toMap().value(path).toMap();
@@ -489,9 +522,135 @@ void QmlPlayerBridge::tickBilibiliResolve() {
         }
     }
     openPath(QString::fromStdWString(stream.url));
+    // The engine is opened with the resolved CDN address, but the playlist stores site
+    // *pages* - that is what can be re-resolved next launch. Point the playlist state at
+    // the page again, otherwise tickPlaylist() compares the CDN address against the
+    // stored page, decides the source is not in the list, and clears the highlight.
+    if (!impl_->pendingBiliPage.isEmpty()) {
+        const QString page = impl_->pendingBiliPage;
+        impl_->playlistPath = page;
+        impl_->sourceLabel = page.toStdWString();
+        // Take the session id from the snapshot openPath() just started, not from the
+        // value captured earlier: tickPlaylist() drops every frame whose sessionId does
+        // not match, so a stale id froze the row at "opening" and it never reached
+        // "playing".
+        const auto live = impl_->engine.snapshot();
+        impl_->openingSessionId = live.sessionId;
+        impl_->playlistSession = live.sessionId;
+        impl_->playlist->setPlayback(page, QStringLiteral("opening"));
+        veyra::log::info("bilibili", std::format("playlist session bound to engine session {}",
+                                                 live.sessionId));
+    }
     // The overlays go on after the open: openPath() replaces the subtitle tracks,
     // so installing the site's CC track before it would be thrown away.
     applyBilibiliExtras(bundle);
+    // Multi-part video: queue one playlist entry per page, so the series plays
+    // through instead of stopping after the part that was opened. The browser
+    // extension already sent the page's own titles (queueWebParts ran before this
+    // open), so this API path is only the fallback for when it could not read the
+    // page - otherwise it would add the same addresses twice with plainer names.
+    if (stream.parts.size() > 1 && !impl_->webPartsQueued) {
+        std::vector<std::wstring> titles;
+        titles.reserve(stream.parts.size());
+        for (const auto& part : stream.parts) titles.push_back(part.title);
+        queueBilibiliParts(titles, stream.currentPart, impl_->pendingBiliPage);
+    }
+    impl_->webPartsQueued = false;   // one order only, per open
+}
+
+void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& currentUrl) {
+    if (parts.size() <= 1) return;
+    impl_->webPartsQueued = true;   // the resolver must not queue a second copy
+    // Deferred deliberately: this runs in the same tick as the open that follows it,
+    // and inserting rows makes the QML playlist view rebuild while the native video
+    // window is being re-created. That combination crashed in Qt6Qml before 2a6051b1.
+    QTimer::singleShot(0, this, [this, parts, currentUrl]() {
+        QStringList urls;
+        QHash<QString, QString> names;
+        for (const auto& part : parts) {
+            if (part.url.trimmed().isEmpty()) continue;
+            if (impl_->playlist->indexOfPath(part.url) >= 0) continue;
+            urls << part.url;
+            if (!part.title.trimmed().isEmpty()) names.insert(part.url, part.title.trimmed());
+        }
+        if (!urls.isEmpty()) {
+            // A new video replaces the previous one's parts. Without this the list grew
+            // a block per video sent, mixing several series together and burying the
+            // entry that is playing. Local files are left alone (see the model).
+            const int before = impl_->playlist->count();
+            impl_->playlist->dropOtherSiteVideos(currentUrl);
+            const int dropped = before - impl_->playlist->count();
+            impl_->playlist->addPathsWithNames(urls, names);
+            veyra::log::info("bilibili", std::format(
+                "queued {} part(s) from the page DOM (titles included), dropped {} old page(s)",
+                urls.size(), dropped));
+        }
+        // Highlight the part that is actually playing. addPathsWithNames() only queues
+        // a job, so the row does not exist yet on the first pass; and when the video is
+        // already queued (playing P10 after P4) there is nothing to add at all. Both
+        // cases need the retry below: it stops as soon as the row can be found.
+        auto* playlist = impl_->playlist;
+        auto attempts = std::make_shared<int>(0);
+        auto highlight = std::make_shared<std::function<void()>>();
+        *highlight = [this, playlist, currentUrl, attempts, highlight]() {
+            // Match by what identifies the video, not by exact string: the address the
+            // extension sent may carry tracking parameters that the queued entries do
+            // not, and query-item order is not stable. setPlayback then needs the
+            // address actually stored in the row, not the one that was searched for.
+            const int row = playlist->indexOfSitePage(currentUrl);
+            if (row >= 0) {
+                playlist->setPlayback(playlist->pathAtRow(row), QStringLiteral("playing"));
+                return;
+            }
+            if (++*attempts >= 60) return;   // ~3 s; give up quietly
+            QTimer::singleShot(50, this, *highlight);
+        };
+        // The first pass runs immediately: on the already-queued path (sending another
+        // episode of the same collection) there is nothing to add, the row already
+        // exists, and waiting 50 ms only gave tickPlaylist() time to clear the state.
+        (*highlight)();
+    });
+
+}
+void QmlPlayerBridge::queueBilibiliParts(const std::vector<std::wstring>& partTitles,
+                                         int currentPart, const QString& pageAddress) {
+    if (partTitles.size() <= 1 || pageAddress.isEmpty()) return;
+    const QUrl base(pageAddress, QUrl::StrictMode);
+    if (!base.isValid()) return;
+    // Rebuild each part's address from the page that was opened, so the resolver runs
+    // again per entry and the CDN signature (which expires) is never stored.
+    QStringList urls;
+    urls.reserve(int(partTitles.size()));
+    for (size_t k = 0; k < partTitles.size(); ++k) {
+        QUrl part = base;
+        QUrlQuery query(base);
+        query.removeAllQueryItems(QStringLiteral("p"));
+        query.addQueryItem(QStringLiteral("p"), QString::number(k + 1));
+        part.setQuery(query);
+        urls << part.toString(QUrl::FullyEncoded);
+    }
+    const int current = std::clamp(currentPart, 1, int(partTitles.size()));
+    // Deferred deliberately. This runs inside the open that openPath() just started,
+    // and inserting rows makes the QML playlist view rebuild; doing that while the
+    // native video window is being re-created is what crashed in Qt6Qml. One
+    // event-loop turn later the open has settled and the rebuild is safe.
+    QTimer::singleShot(0, this, [this, urls, current]() {
+        QStringList fresh;
+        for (const auto& url : urls) {
+            if (url.trimmed().isEmpty()) continue;
+            if (impl_->playlist->indexOfPath(url) >= 0) continue;
+            fresh << url;
+        }
+        if (fresh.isEmpty()) return;
+        // Same as the DOM path: a new video replaces the previous one's parts.
+        impl_->playlist->dropOtherSiteVideos(urls.value(current - 1));
+        impl_->playlist->addPaths(fresh);
+        // Mark the part that is actually playing, so auto-advance continues from
+        // there instead of jumping back to page 1.
+        impl_->playlist->setPlayback(urls.value(current - 1), QStringLiteral("playing"));
+        veyra::log::info("bilibili", std::format(
+            "queued {} part(s) into the playlist (current=P{})", fresh.size(), current));
+    });
 }
 
 // Danmaku and CC subtitles for the part that just opened. A failed request stays

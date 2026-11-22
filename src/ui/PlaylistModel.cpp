@@ -11,6 +11,7 @@
 #include <QLocale>
 #include <QSaveFile>
 #include <QUrl>
+#include <QUrlQuery>
 #include <algorithm>
 #include <utility>
 #ifdef Q_OS_WIN
@@ -52,11 +53,43 @@ PlaylistModel::~PlaylistModel() {
     if (saveTimer_.isActive()) save();
 }
 int PlaylistModel::rowCount(const QModelIndex& parent) const { return parent.isValid() ? 0 : count(); }
+bool PlaylistModel::isNetworkPath(const QString& path) {
+    // Anything with a scheme the engine can open. Checked before any QFileInfo/QDir
+    // call, because those mangle a URL: cleanPath turns "https://host/a?p=2" into
+    // "https:/host/a?p=2", and the entry could never be reopened.
+    const int colon = path.indexOf(QLatin1Char(':'));
+    if (colon <= 1 || colon > 8) return false;   // "C:\..." has the colon at 1
+    static const QStringList schemes{
+        QStringLiteral("http"), QStringLiteral("https"), QStringLiteral("rtsp"),
+        QStringLiteral("rtp"), QStringLiteral("udp"), QStringLiteral("rtmp")};
+    return schemes.contains(path.left(colon).toLower());
+}
 QString PlaylistModel::normalizedPath(const QString& path) {
+    if (isNetworkPath(path)) return path;   // addresses are stored verbatim
     return QDir::cleanPath(QFileInfo(QDir::fromNativeSeparators(path)).absoluteFilePath());
 }
 QString PlaylistModel::keyOf(const QString& path) {
     auto value = normalizedPath(path);
+    // A site page is identified by the video and the part, not by the exact string: the
+    // browser appends tracking parameters (vd_source, spm_id_from, trackid) and they are
+    // not stable, so the same episode could be added twice as two different rows. A page
+    // with no p at all is part 1 (the Bilibili URL for the first part usually omits it).
+    if (isNetworkPath(value)) {
+        const QUrl url(value, QUrl::StrictMode);
+        if (url.isValid() && !url.host().isEmpty()) {
+            auto part = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
+            if (part.isEmpty()) part = QStringLiteral("1");
+            // Bilibili uses both "/video/BVxxxx" and "/video/BVxxxx/" for one page, so
+            // the trailing slash cannot be part of the identity either.
+            QString pagePath = url.path();
+            while (pagePath.endsWith(QLatin1Char('/'))) pagePath.chop(1);
+            auto key = url.host().toLower() + pagePath + QLatin1Char('#') + part;
+#ifdef Q_OS_WIN
+            key = key.toCaseFolded();
+#endif
+            return key;
+        }
+    }
 #ifdef Q_OS_WIN
     value = value.toCaseFolded();
 #endif
@@ -72,11 +105,14 @@ bool PlaylistModel::supported(const QString& path) {
 QVariant PlaylistModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid() || index.row() < 0 || index.row() >= count()) return {};
     const auto& entry = entries_[index.row()];
+    const bool network = isNetworkPath(entry.path);
     switch (role) {
     case Qt::DisplayRole: case NameRole: return entry.name;
     case PathRole: return QDir::toNativeSeparators(entry.path);
-    case SizeRole: return QLocale().formattedDataSize(entry.size);
-    case ModifiedRole: return QDateTime::fromMSecsSinceEpoch(entry.modified).toString("yyyy-MM-dd HH:mm");
+    // A site page has no file size and no modified time; showing "0 字节 · 1970-01-01"
+    // reads like a broken file. Say what it actually is.
+    case SizeRole: return network ? tr("网络视频") : QLocale().formattedDataSize(entry.size);
+    case ModifiedRole: return network ? QString() : QDateTime::fromMSecsSinceEpoch(entry.modified).toString("yyyy-MM-dd HH:mm");
     case CurrentRole: return entry.key == currentKey_;
     case StateRole: return entry.key == currentKey_ ? state_ : QString();
     default: return {};
@@ -117,6 +153,9 @@ void PlaylistModel::addUrls(const QList<QUrl>& urls) {
     addPaths(paths);
 }
 void PlaylistModel::addPaths(const QStringList& paths) {
+    addPathsWithNames(paths, {});
+}
+void PlaylistModel::addPathsWithNames(const QStringList& paths, const QHash<QString, QString>& names) {
     if (paths.isEmpty()) return;
     if (pending_ >= maxJobs || count() >= maxEntries) {
         emit error(tr("列表或导入任务已达上限，请稍后重试或移除部分条目")); return;
@@ -124,7 +163,13 @@ void PlaylistModel::addPaths(const QStringList& paths) {
     // No directory/file existence checks here: a network folder can be slow.
     Job job; job.generation = generation_.load();
     for (const auto& path : paths) {
-        if (!path.trimmed().isEmpty() && job.paths.size() < maxEntries) job.paths << normalizedPath(path);
+        if (!path.trimmed().isEmpty() && job.paths.size() < maxEntries) {
+            const auto normalized = normalizedPath(path);
+            job.paths << normalized;
+            // The caller's name wins over the one derived from the path.
+            const auto it = names.constFind(path);
+            if (it != names.constEnd() && !it->trimmed().isEmpty()) job.names.insert(normalized, *it);
+        }
     }
     if (job.paths.isEmpty()) return;
     const bool wasBusy = busy(); ++pending_;
@@ -160,6 +205,26 @@ PlaylistModel::Result PlaylistModel::scan(const Job& job, std::stop_token stop) 
     };
     for (const auto& path : job.paths) {
         if (cancelled()) return {};
+        // A network address is an entry in its own right: no file to stat, no suffix
+        // to check. Multi-part Bilibili videos contribute one address per part, and
+        // the ?p= suffix is what tells two entries of the same video apart.
+        if (isNetworkPath(path)) {
+            const auto key = keyOf(path);
+            if (found.contains(key)) continue;
+            found.insert(key);
+            // A name supplied by the caller wins: for a site page that is the title
+            // the site shows, which the URL alone cannot reproduce.
+            QString name = job.names.value(path);
+            if (name.isEmpty()) {
+                name = QUrl(path).fileName();
+                if (name.isEmpty()) name = QUrl(path).host();
+                const QString part = QUrlQuery(QUrl(path)).queryItemValue(QStringLiteral("p"));
+                if (!part.isEmpty()) name += QStringLiteral(" (P%1)").arg(part);
+            }
+            result.entries.push_back({path, name, key, 0, 0});
+            if (int(result.entries.size()) >= maxEntries) { result.limited = true; break; }
+            continue;
+        }
         const QFileInfo info(path);
         if (info.isDir() && !reparse(info)) directories << path;
         else file(info);
@@ -179,7 +244,12 @@ PlaylistModel::Result PlaylistModel::scan(const Job& job, std::stop_token stop) 
             if (int(result.entries.size()) >= maxEntries) { result.limited = true; break; }
         }
     }
-    if (!cancelled()) order(result.entries, NameAscending);
+    // A site page's list has its own meaningful order (P1, P2, ... / episode order) and
+    // the caller sends it in that order; re-sorting by name scrambles it ("二" before
+    // "一"). Files keep the existing name sort, which is what makes a folder readable.
+    const bool hasSitePages = std::any_of(result.entries.begin(), result.entries.end(),
+        [this](const Entry& e) { return isNetworkPath(e.path); });
+    if (!cancelled() && !hasSitePages) order(result.entries, NameAscending);
     return result;
 }
 void PlaylistModel::workerLoop(std::stop_token stop) {
@@ -225,11 +295,87 @@ int PlaylistModel::indexOfPath(const QString& path) const {
     for (int i = 0; i < count(); ++i) if (entries_[i].key == key) return i;
     return -1;
 }
+int PlaylistModel::indexOfSitePage(const QString& path) const {
+    // A site page can be written several ways: the browser may append tracking
+    // parameters (spm_id_from, vd_source, trackid), the order of query items is not
+    // stable, and Bilibili itself uses both "/video/BVxxxx" and "/video/BVxxxx/" for the
+    // same page. Compare what identifies the video instead: host + path (trailing slash
+    // ignored) + the part. A page with no p at all is part 1, because the URL for the
+    // first part usually omits it while the queued entry says p=1.
+    const QUrl wanted(path, QUrl::StrictMode);
+    if (!wanted.isValid() || wanted.host().isEmpty()) return -1;
+    const auto pathOf = [](const QUrl& url) {
+        QString p = url.path();
+        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
+        return p;
+    };
+    const auto partOf = [](const QUrl& url) {
+        const auto value = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
+        return value.isEmpty() ? QStringLiteral("1") : value;
+    };
+    const auto wantedPart = partOf(wanted);
+    const auto wantedPath = pathOf(wanted);
+    for (int i = 0; i < count(); ++i) {
+        const QUrl candidate(entries_[i].path, QUrl::StrictMode);
+        if (!candidate.isValid()) continue;
+        if (candidate.host().compare(wanted.host(), Qt::CaseInsensitive) != 0) continue;
+        if (pathOf(candidate) != wantedPath) continue;
+        if (partOf(candidate) == wantedPart) return i;
+    }
+    return -1;
+}
+QString PlaylistModel::pathAtRow(int row) const {
+    if (row < 0 || row >= count()) return {};
+    return entries_[row].path;
+}
+void PlaylistModel::dropOtherSiteVideos(const QString& path) {
+    // Identify the video by host + path (the BV id). Everything else that is a site
+    // page belongs to an earlier video and is removed; local files are never touched,
+    // so a mixed list keeps its own entries.
+    const QUrl keep(path, QUrl::StrictMode);
+    if (!keep.isValid() || keep.host().isEmpty()) return;
+    // Trailing slash is not significant here either: /video/BVxxxx and /video/BVxxxx/
+    // are the same page, and Bilibili uses both.
+    const auto pathOf = [](const QUrl& url) {
+        QString p = url.path();
+        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
+        return p;
+    };
+    const auto keepPath = pathOf(keep);
+    std::vector<int> doomed;
+    for (int i = 0; i < count(); ++i) {
+        const auto& entry = entries_[i];
+        if (!isNetworkPath(entry.path)) continue;          // local file: keep
+        const QUrl candidate(entry.path, QUrl::StrictMode);
+        if (!candidate.isValid()) continue;
+        const bool sameVideo = candidate.host().compare(keep.host(), Qt::CaseInsensitive) == 0 &&
+                               pathOf(candidate) == keepPath;
+        if (!sameVideo) doomed.push_back(i);
+    }
+    if (doomed.empty()) return;
+    // Remove back to front so the earlier indices stay valid.
+    for (auto it = doomed.rbegin(); it != doomed.rend(); ++it) {
+        const int row = *it;
+        keys_.remove(entries_[row].key);
+        beginRemoveRows({}, row, row);
+        entries_.erase(entries_.begin() + row);
+        endRemoveRows();
+    }
+    emit countChanged(); emit currentChanged(); saveTimer_.start();
+}
 bool PlaylistModel::play(int row) {
     if (row < 0 || row >= count()) return false;
     const QString path = entries_[row].path;
-    if (!QFileInfo(path).isFile()) { emit error(tr("文件不存在或已移动：%1").arg(QDir::toNativeSeparators(path))); return false; }
-    emit playRequested(QDir::toNativeSeparators(path)); return true;
+    // A network address has no file to stat; the engine reports a bad one when it
+    // tries to open it. Local entries still fail here, which keeps "file moved or
+    // deleted" off the engine.
+    const bool network = isNetworkPath(path);
+    if (!network && !QFileInfo(path).isFile()) {
+        emit error(tr("文件不存在或已移动：%1").arg(QDir::toNativeSeparators(path)));
+        return false;
+    }
+    emit playRequested(network ? path : QDir::toNativeSeparators(path));
+    return true;
 }
 bool PlaylistModel::playFrom(int row, int direction) {
     for (; row >= 0 && row < count(); row += direction) {
@@ -286,7 +432,14 @@ bool PlaylistModel::save() {
     if (storage_.isEmpty()) return true;
     if (unreadable_) return false;   // status_ already tells the user the file was not loaded
     QJsonArray array;
-    for (const auto& entry : entries_) array.append(QJsonObject{{"path", entry.path}, {"size", double(entry.size)}, {"modified", double(entry.modified)}});
+    for (const auto& entry : entries_) {
+        QJsonObject o{{"path", entry.path}, {"size", double(entry.size)}, {"modified", double(entry.modified)}};
+        // Site pages carry a title that exists only in the page (a Bilibili part name),
+        // so it has to be persisted: it cannot be recovered from the URL on reload.
+        // Local files keep deriving their name from the path as before.
+        if (isNetworkPath(entry.path) && !entry.name.isEmpty()) o.insert("name", entry.name);
+        array.append(o);
+    }
     QSaveFile file(storage_);
     const auto bytes = QJsonDocument(QJsonObject{{"version", 1}, {"sort", sort_}, {"autoAdvance", autoAdvance_}, {"entries", array}}).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
@@ -311,11 +464,29 @@ void PlaylistModel::load() {
     autoAdvance_ = object.value("autoAdvance").toBool(true);
     for (const auto& value : object.value("entries").toArray()) {
         const auto entry = value.toObject(); const auto path = entry.value("path").toString();
-        if (path.isEmpty() || !QDir::isAbsolutePath(path) || !supported(path)) continue;
+        if (path.isEmpty()) continue;
+        // A saved network address (a multi-part Bilibili video keeps one per part) is
+        // not an absolute filesystem path and has no file suffix, so the file checks
+        // below would drop it every time the list is reloaded.
+        const bool network = isNetworkPath(path);
+        if (!network && (!QDir::isAbsolutePath(path) || !supported(path))) continue;
         const auto normalized = normalizedPath(path), key = keyOf(normalized);
         if (keys_.contains(key)) continue;
         keys_.insert(key);
-        entries_.push_back({normalized, QFileInfo(normalized).fileName(), key,
+        QString name;
+        if (network) {
+            // A saved name wins: it is the site's own title, which the URL cannot give.
+            name = entry.value("name").toString().trimmed();
+            if (name.isEmpty()) {
+                name = QUrl(normalized).fileName();
+                if (name.isEmpty()) name = QUrl(normalized).host();
+                const QString part = QUrlQuery(QUrl(normalized)).queryItemValue(QStringLiteral("p"));
+                if (!part.isEmpty()) name += QStringLiteral(" (P%1)").arg(part);
+            }
+        } else {
+            name = QFileInfo(normalized).fileName();
+        }
+        entries_.push_back({normalized, name, key,
                            std::max(qint64(0), entry.value("size").toInteger()),
                            entry.value("modified").toInteger()});
         if (count() >= maxEntries) break;

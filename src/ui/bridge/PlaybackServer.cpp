@@ -2,6 +2,7 @@
 #include "veyra/Log.h"
 #include <QHostAddress>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -104,8 +105,33 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
     }
     if(!browserCookie.isEmpty())
         log::info("playback-server",std::format("request carried {} bytes of browser cookie; Veyra uses its own session",browserCookie.size()));
-    QMetaObject::invokeMethod(this,[handler=handler_,url,quality]{if(handler)handler(url,quality);},Qt::QueuedConnection);
-    log::info("playback-server",std::format("play requested: host={} qn={}",parsed.host().toStdString(),quality));
+    // Multi-part Bilibili video: the extension read the page DOM and sent one entry
+    // per part with the title the site shows. Validated like `url` - anything that
+    // fails the checks is dropped rather than rejecting the whole request, because
+    // playback itself only needs `url`.
+    QList<Part> parts;
+    {
+        const auto list = object.value("parts");
+        if (list.isArray()) {
+            for (const auto& value : list.toArray()) {
+                const auto o = value.toObject();
+                const auto title = o.value("title").toString().trimmed();
+                const auto partUrl = o.value("url").toString().trimmed();
+                const int page = o.value("p").toInt(0);
+                if (page < 1 || partUrl.isEmpty() || partUrl.size() > 8192) continue;
+                const QUrl candidate(partUrl, QUrl::StrictMode);
+                if (!candidate.isValid() || candidate.host().isEmpty() ||
+                    (candidate.scheme() != "http" && candidate.scheme() != "https") ||
+                    !candidate.userInfo().isEmpty()) continue;
+                parts.append(Part{page, title, partUrl});
+            }
+        }
+    }
+    QMetaObject::invokeMethod(this,[this,handler=handler_,url,quality,parts]{
+        if(handler)handler(url,quality,parts);
+    },Qt::QueuedConnection);
+    log::info("playback-server",std::format("play requested: host={} qn={} parts={}",
+                                            parsed.host().toStdString(),quality,parts.size()));
     respond(socket,200,R"({"ok":true})",origin);
 }
 void PlaybackServer::onNewConnection(){

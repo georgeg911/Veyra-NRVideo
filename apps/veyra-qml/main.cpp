@@ -746,11 +746,23 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     QString protocolUrl;
     // The extension appends the Bilibili qn it read from the page (0 = best).
     int protocolQuality = 0;
+    // A multi-part video sends its part list along, so the playlist still gets the
+    // site's own titles when Veyra had to be started by the protocol handler.
+    // Packed as "<p>|<title>|<url>" per line, URL-encoded as one parameter.
+    QList<ui::QmlPlayerBridge::WebPart> protocolParts;
     for (const QString& a : QCoreApplication::arguments()) {
         if (!a.startsWith(QStringLiteral("veyra://"), Qt::CaseInsensitive)) continue;
         const QUrlQuery query(QUrl(a).query());
         protocolUrl = query.queryItemValue(QStringLiteral("url"), QUrl::FullyDecoded);
         protocolQuality = query.queryItemValue(QStringLiteral("quality")).toInt();
+        const auto packed = query.queryItemValue(QStringLiteral("parts"), QUrl::FullyDecoded);
+        for (const auto& line : packed.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            const auto fields = line.split(QLatin1Char('|'));
+            if (fields.size() < 3) continue;
+            const int page = fields.at(0).toInt();
+            if (page < 1) continue;
+            protocolParts.append({page, fields.at(1), fields.mid(2).join(QLatin1Char('|'))});
+        }
         break;
     }
     ui::QmlPlayerBridge bridge(controller, dataDirectory);
@@ -761,15 +773,31 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     // Custom (Chrome bridge): local HTTP endpoint the browser extension posts to.
     // 127.0.0.1 only; port 18765 is fixed so the extension can find it without
     // reading anything off disk (a browser cannot open local files).
-    ui::PlaybackServer playbackServer([&bridge](const QString& url, int quality){
-        bridge.bringToFront();bridge.openNetworkAddress(url, quality);
+    ui::PlaybackServer playbackServer([&bridge](const QString& url, int quality,
+                                               const QList<ui::PlaybackServer::Part>& parts){
+        bridge.bringToFront();
+        // A multi-part video arrives with the page's own part titles; queue those
+        // before the open so the list shows what the site shows.
+        if (!parts.isEmpty()) {
+            QList<ui::QmlPlayerBridge::WebPart> webParts;
+            webParts.reserve(parts.size());
+            for (const auto& part : parts)
+                webParts.append({part.page, part.title, part.url});
+            bridge.queueWebParts(webParts, url);
+        }
+        bridge.openNetworkAddress(url, quality);
     });
     if (!updateProbe) playbackServer.listen(18765);
     if (!protocolUrl.isEmpty()) {
-        veyra::log::info("playback-server", std::format("protocol request: host={} qn={}",
-                                                         QUrl(protocolUrl).host().toStdString(), protocolQuality));
-        QTimer::singleShot(1500, &bridge, [&bridge, url = protocolUrl, quality = protocolQuality] {
+        veyra::log::info("playback-server", std::format("protocol request: host={} qn={} parts={}",
+                                                         QUrl(protocolUrl).host().toStdString(), protocolQuality,
+                                                         protocolParts.size()));
+        QTimer::singleShot(1500, &bridge, [&bridge, url = protocolUrl, quality = protocolQuality,
+                                           parts = protocolParts] {
             bridge.bringToFront();
+            // Same order as the HTTP route: queue the parts first so the entry that is
+            // about to play is already in the list and can be highlighted.
+            if (!parts.isEmpty()) bridge.queueWebParts(parts, url);
             bridge.openNetworkAddress(url, quality);
         });
     }
@@ -974,7 +1002,12 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
                 veyra::log::info("qml-test", std::format("pref-at {}={}", pkey.toStdString(), pval.toStdString()));
                 bridge.setPreference(pkey, pval);
             });
-        } else if (!a.startsWith(QLatin1Char('-'))) {
+        } else if (!a.startsWith(QLatin1Char('-')) &&
+                   !a.startsWith(QStringLiteral("veyra://"), Qt::CaseInsensitive)) {
+            // A bare argument is a file to open. A veyra:// URL is not: it is the
+            // protocol request, already parsed above, and it must not become `openPath`
+            // (that path ends in openPath(), which refuses the scheme and, worse, made
+            // the "no explicit source" branch below think a source had been given).
             openPath = a;
         }
     }
@@ -986,7 +1019,12 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     engine.rootContext()->setContextProperty(QStringLiteral("vyTest"), testOptions);
     if (!openPath.isEmpty() && !updateProbe) {
         QTimer::singleShot(600, &bridge, [&bridge, openPath] { bridge.openPath(openPath); });
-    } else if (!updateProbe) {
+    } else if (!updateProbe && protocolUrl.isEmpty()) {
+        // No explicit source and no protocol request: resume the last one.
+        // A protocol request must NOT resume: it runs on its own 1500 ms timer, so
+        // auto-resume at 600 ms used to open the previous video first, and by the time
+        // the protocol callback ran the resolver was busy - the part list was never
+        // queued and nothing was highlighted.
         QTimer::singleShot(600, &bridge, [&bridge] { bridge.autoResumeLastSource(); });
     }
 

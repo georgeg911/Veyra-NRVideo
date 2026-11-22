@@ -41,6 +41,15 @@ struct BilibiliStream {
     std::wstring codec;      // e.g. "avc1.64001F"
     std::wstring audioCodec; // e.g. "mp4a.40.2"
     int quality = 0;         // Bilibili quality id that was selected
+    // Every page of a multi-part video (分P), in page order; one entry for a
+    // single-part clip. The player queues one playlist entry per part so a lecture
+    // series plays through instead of stopping after part 1.
+    struct Part {
+        long long cid = 0;
+        std::wstring title;      // the site's own "P1 ..." title
+    };
+    std::vector<Part> parts;
+    int currentPart = 1;         // 1-based page the resolved stream belongs to
     // The playurl response lists several mirrors for one audio rendition under
     // backupUrl. They are live CDN edges, not copies, and the API hands the player
     // all of them precisely so it can move on when one edge stops serving. Playback

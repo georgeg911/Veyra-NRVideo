@@ -667,6 +667,14 @@ class QmlPlayerBridge : public QObject {
 
 public:
     QObject* playlist() const;
+    // One page of a multi-part video as the browser extension read it from the DOM:
+    // the page number, the site's own title, and its address. Public because
+    // apps/veyra-qml/main.cpp builds it from the playback-server callback.
+    struct WebPart { int page = 0; QString title; QString url; };
+    // Queue a part list read from the page DOM. Preferred over the API path because
+    // the titles are exactly what the user sees on the site. currentUrl is the entry
+    // being opened, which gets highlighted in the list.
+    void queueWebParts(const QList<WebPart>& parts, const QString& currentUrl);
     Q_INVOKABLE void showPlaylist();
     Q_INVOKABLE void addPlaylistFilesDialog();
     Q_INVOKABLE void addPlaylistFolderDialog();
@@ -1650,6 +1658,11 @@ private:
     void tickBilibiliResolve();
     // Danmaku and CC subtitles for the part the resolve just opened.
     void applyBilibiliExtras(const BilibiliBundle& bundle);
+    // Queues one playlist entry per page of a multi-part Bilibili video. Takes the
+    // values it needs rather than the stream type, so this header does not have to
+    // pull in the media resolver.
+    void queueBilibiliParts(const std::vector<std::wstring>& partTitles, int currentPart,
+                            const QString& pageAddress);
     void installBiliSubtitle(const BilibiliBundle& bundle);
     // One danmaku frame from the poll loop.
     void tickDanmaku();

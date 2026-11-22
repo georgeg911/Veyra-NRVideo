@@ -41,14 +41,30 @@ public:
     void setAutoAdvance(bool enabled);
     static bool supported(const QString& path);
     static QString normalizedPath(const QString& path);
+    // True for addresses the engine opens directly (http/https/rtsp/rtp/udp/rtmp).
+    // Those must never go through filesystem normalisation or existence checks.
+    static bool isNetworkPath(const QString& path);
     bool containsPath(const QString& path) const { return keys_.contains(keyOf(path)); }
     void setPlayback(const QString& path, const QString& state);
     // Returns false at the ends: never silently wraps or restarts the same file.
     bool advanceAfterEnd();
     Q_INVOKABLE void addPaths(const QStringList& paths);
+    // Same, but with the display name for each entry. Site pages use this: the title
+    // exists only in the page, the URL cannot produce it.
+    void addPathsWithNames(const QStringList& paths, const QHash<QString, QString>& names);
     Q_INVOKABLE void addUrls(const QList<QUrl>& urls);
     Q_INVOKABLE QString pathAt(int row) const;
     Q_INVOKABLE int indexOfPath(const QString& path) const;
+    // Same, but tolerant about how a site page is written: tracking parameters and
+    // query-item order are ignored, only host + path + the p value have to match.
+    int indexOfSitePage(const QString& path) const;
+    // The address stored for a row, which is what setPlayback has to be given.
+    QString pathAtRow(int row) const;
+    // Drop every site-page entry that belongs to a different video than the one
+    // `path` points at, keeping local files untouched. Used when a new multi-part
+    // video is sent: the previous video's parts would otherwise pile up and bury the
+    // one that is playing.
+    void dropOtherSiteVideos(const QString& path);
     Q_INVOKABLE bool play(int row);
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();
@@ -68,7 +84,11 @@ signals:
     void error(const QString& text);
 private:
     struct Entry { QString path, name, key; qint64 size = 0, modified = 0; };
-    struct Job { QStringList paths; uint64_t generation = 0; };
+    struct Job { QStringList paths; uint64_t generation = 0;
+                 // Path -> the name to show instead of the one derived from the path.
+                 // Used for site pages, where the title lives in the page and cannot
+                 // be recovered from the URL.
+                 QHash<QString, QString> names; };
     struct Result { std::vector<Entry> entries; int skipped = 0; bool limited = false; };
     static QString keyOf(const QString& path);
     static void order(std::vector<Entry>& entries, int mode);

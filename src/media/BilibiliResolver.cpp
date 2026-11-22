@@ -217,6 +217,22 @@ BilibiliStream resolveBilibiliStream(const std::wstring& pageUrl, const std::wst
     // on aid+cid. The view answer is authoritative for aid in either URL form.
     result.aid = viewRoot["data"]["aid"].asInt(0);
     result.cid = cid;
+    // Multi-part videos: keep every page so the caller can build a playlist. A
+    // single-part clip also has one entry here, so `parts.size() > 1` is the test
+    // for "this is a 分P video".
+    result.currentPart = pageIndex;
+    for (size_t k = 0; k < pages.size(); ++k) {
+        const auto& page = pages[k];
+        BilibiliStream::Part part;
+        part.cid = page["cid"].asInt(0);
+        if (part.cid <= 0) continue;
+        part.title = fromUtf8(page["part"].asString());
+        result.parts.push_back(std::move(part));
+    }
+    if (result.parts.size() > 1) {
+        log::info("bilibili", std::format("multi-part video: {} pages, current=P{}",
+                                          result.parts.size(), result.currentPart));
+    }
 
     // 2. Ask for the DASH manifest. fnval 4048 = DASH | HDR | 4K | Dolby audio |
     //    Dolby Vision | 8K | AV1; fourk=1 keeps 4K in the answer.

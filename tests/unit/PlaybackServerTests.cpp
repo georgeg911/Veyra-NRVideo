@@ -12,7 +12,10 @@ int main(int argc, char** argv) {
     int delivered=0, failed=0, checks=0;
     QString last;
     int lastQuality=-1;
-    veyra::ui::PlaybackServer server([&](const QString& url,int quality){++delivered;last=url;lastQuality=quality;});
+    QList<veyra::ui::PlaybackServer::Part> lastParts;
+    veyra::ui::PlaybackServer server([&](const QString& url,int quality,
+                                        const QList<veyra::ui::PlaybackServer::Part>& parts){
+        ++delivered;last=url;lastQuality=quality;lastParts=parts;});
     if(!server.listen(0)) return 1;
     const QByteArray host="127.0.0.1:"+QByteArray::number(server.serverPort());
     const QByteArray origin="chrome-extension://"+QByteArray(32,'a');

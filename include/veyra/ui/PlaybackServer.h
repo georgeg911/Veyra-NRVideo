@@ -24,7 +24,11 @@ class PlaybackServer : public QObject {
     Q_OBJECT
 public:
     // quality: 0 = best available, otherwise the Bilibili qn from the page.
-    using PlayHandler=std::function<void(const QString& url, int quality)>;
+    // parts: one entry per page of a multi-part Bilibili video, read from the page
+    // DOM by the extension so the player can show the site's own titles. Empty for
+    // everything else. Each entry is {p: <1-based page number>, title: <text>, url}.
+    struct Part { int page = 0; QString title; QString url; };
+    using PlayHandler=std::function<void(const QString& url, int quality, const QList<Part>& parts)>;
     explicit PlaybackServer(PlayHandler handler, QObject* parent = nullptr);
     ~PlaybackServer() override;
 
