@@ -1416,47 +1416,16 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
         // 30 s ahead here just looks like the picture teleporting. A local file is different -
         // a sparse file's holes are static and will not heal, so the only option is to step
         // over them.
-        if (tolerant_ && !localNetworkSource_) {
-            const uint64_t dropped = decoder_.stats().badPacketsDropped;
-            if (dropped != lastDroppedPackets_) {
-                const uint64_t delta = dropped - lastDroppedPackets_;
-                lastDroppedPackets_ = dropped;
-                droppedInWindow_ += delta;
-                const auto nowDrop = std::chrono::steady_clock::now();
-                if (dropWindowStart_ == std::chrono::steady_clock::time_point{}) dropWindowStart_ = nowDrop;
-                if (nowDrop - dropWindowStart_ > std::chrono::seconds(2)) {
-                    dropWindowStart_ = nowDrop;
-                    droppedInWindow_ = delta;
-                }
-                if (droppedInWindow_ >= 400) {
-                    // 基准取「解复用器当前所在位置」，不是 lastPtsUs_：后者在 seek 之后是
-                    // INT64_MIN，会让跳转算成从 0 秒起跳（实测跳到 30 秒而不是 5030 秒）。
-                    // Base the jump on where the demuxer actually is, not on lastPtsUs_: the
-                    // latter is INT64_MIN right after a seek, which made the jump start from
-                    // zero (measured: landed at 30 s instead of 5030 s).
-                    const int64_t fromUs = demuxer_.positionUs() >= 0 ? demuxer_.positionUs()
-                                          : (lastPtsUs_ != INT64_MIN ? lastPtsUs_ : 0);
-                    const int64_t nextUs = fromUs + kSkipStepUs_;
-                    if (++damageJumpCount_ <= kMaxDamageJumps && demuxer_.seekToUs(nextUs, /*byUser=*/true)) {
-                        veyra::log::warn("source-file", std::format(
-                            "damaged hole: {} packets dropped in 2 s; jumped {:.0f} s ahead to {:.1f} s (jump #{}/{})",
-                            droppedInWindow_, kSkipStepUs_ / 1e6, nextUs / 1e6, damageJumpCount_, kMaxDamageJumps));
-                        droppedInWindow_ = 0;
-                        dropWindowStart_ = {};
-                        // 告诉引擎我们内部跳到了哪里，它据此把音频一起挪过去。
-                        // Tell the engine where we jumped internally so it moves the audio too.
-                        pendingPositionJumpUs_ = nextUs;
-                        startKeyframeWait();
-                        resumeAfterUs_ = INT64_MIN;
-                        lastPtsUs_ = INT64_MIN;
-                        ++epoch_;
-                        continue;
-                    }
-                    if (damageJumpCount_ > kMaxDamageJumps)
-                        veyra::log::error("source-file", std::format("giving up after {} damaged holes", kMaxDamageJumps));
-                }
-            }
-        }
+        // 自动跳段已关闭。实测它会破坏音画同步：视频跳到「有帧的位置」，音频跳到
+        // 同一时间点却可能是空的，之后音频永远填不回来（实测音画差 35 秒后播放死掉）。
+        // 可靠的做法是用户手动 seek —— 那走完整的 seek 路径，两条流一起动、锚点重建。
+        // 保留的是「丢包跳过」：坏包丢弃、解码继续，画面能一直走到下一个可用帧。
+        // Automatic hole-skipping is off. It was measured to break A/V sync: the picture
+        // jumps to a position that has frames while the audio jumps to the same time and finds
+        // nothing, after which it never refills (a 35 s gap, then playback died). A manual
+        // seek is the reliable path - it moves both streams and rebuilds the anchor.
+        // What stays is bad-packet skipping: a dropped packet, decoding continues, and the
+        // picture walks forward to the next usable frame.
         if (!decoder_.sendPacket(packet)) {
             if (tolerant_ && tolerateDecoderError()) {
                 continue;
@@ -2049,13 +2018,6 @@ bool MediaFileSource::tolerateDecoderError()
     }
     startKeyframeWait();
     return true;
-}
-
-int64_t MediaFileSource::consumePositionJumpUs()
-{
-    const int64_t value = pendingPositionJumpUs_;
-    pendingPositionJumpUs_ = -1;
-    return value;
 }
 
 // Damaged data reached the decoder: drop what it holds and feed it again from the next clean keyframe.

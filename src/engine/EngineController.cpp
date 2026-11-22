@@ -2481,20 +2481,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // Frame, not Waiting, so a check in the waiting branch never fires (measured
                     // a 200 s A/V gap that went undetected).
                     if(!isCapture&&!isImage&&activeSource){
-                        if(const int64_t jumpUs=activeSource->consumePositionJumpUs();jumpUs>=0){
-                            veyra::log::warn("source-file",std::format(
-                                "source jumped internally to {:.1f} s; moving the audio there too",jumpUs/1e6));
-                            if(audioStarted)(void)audioPipe.requestSeek(double(jumpUs)/1000.0);
-                            lastAudioClockMs=double(jumpUs)/1000.0;
-                            audioClockExhausted=false;
-                            audioRebuffering=false;
-                            anchorMs=double(jumpUs)/1000.0;
-                            anchor=Clock::now();
-                            reset=true;
-                            pendingResetCause=pipeline::ResetReason::Seek;
-                            seekPreviewPending=true;
-                        }
-                    }
+                                            }
                     // Keep the accepted transaction and rollback state alive until
                     // the next real capture sample arrives. Never bind old PTS to now.
                     while(transaction&&isCapture&&rs==source::SourceReadStatus::Waiting&&!stop_){
@@ -2509,20 +2496,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // The picture is then ahead of the audio - measured a 200 s gap, after
                     // which the player paused itself. Move the audio along so they stay in step.
                     if(!isCapture&&!isImage&&activeSource){
-                        if(const int64_t jumpUs=activeSource->consumePositionJumpUs();jumpUs>=0){
-                            veyra::log::warn("source-file",std::format(
-                                "source jumped internally to {:.1f} s; moving the audio there too",jumpUs/1e6));
-                            if(audioStarted)(void)audioPipe.requestSeek(double(jumpUs)/1000.0);
-                            lastAudioClockMs=double(jumpUs)/1000.0;
-                            audioClockExhausted=false;
-                            audioRebuffering=false;
-                            anchorMs=double(jumpUs)/1000.0;
-                            anchor=Clock::now();
-                            reset=true;
-                            pendingResetCause=pipeline::ResetReason::Seek;
-                            seekPreviewPending=true;
-                        }
-                    }
+                                            }
                     if(rs==source::SourceReadStatus::Waiting){if(isScreen){std::lock_guard lock(mutex_);snapshot_.sourceNotice=screenSource.status();}advanceLive();publishWaitingProgress();waitLive();continue;}
                     if(rs==source::SourceReadStatus::Eos){
                         fileInputEnded=true;

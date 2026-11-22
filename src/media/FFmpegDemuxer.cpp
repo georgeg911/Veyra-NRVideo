@@ -480,34 +480,14 @@ bool FFmpegDemuxer::readVideoPacket(bool& endOfFile)
             // file a hole reads as all-zero bytes, the demuxer finds no next packet and
             // reports EOF - while real data exists further on. Walk forward: if a packet
             // turns up, continue; give up only when the skip budget is spent.
-            if (tolerant_) {
-                clearAvioError(context_);
-                const int64_t fromUs = packetAtUs_ >= 0 ? packetAtUs_ : 0;
-                const int64_t totalUs = durationUs();
-                // 跳到「最远有数据的地方」而不是一路往后加：稀疏文件的空洞能占大半个
-                // 文件，从空洞里往后每 30 秒试一次会直接试到文件末尾，然后永远 EOF
-                // （实测 40 次探测全在 9413 s 处空转，画面就此结束）。
-                // 这里的做法是重新从头找：空洞之后没有数据时，唯一还有数据的地方在
-                // 前面。所以把搜索位置回绕到 0，从头再走一遍——已经播过的部分会很快
-                // 因为缓存/顺序读跳过，找到的就还是那片有数据的区域。
-                // Jump to "the furthest place that has data" instead of walking forward:
-                // holes in a sparse file can span most of it, so trying +30 s at a time from
-                // inside one walks straight to EOF and then EOFs for ever (measured: all 40
-                // probes stuck at 9413 s and playback ended there). When nothing follows a
-                // hole the only data left is before it, so wrap back to the start and walk
-                // again - the part already played passes quickly and we land on the same
-                // usable region.
-                int64_t nextUs = fromUs + kDamageSkipStepUs;
-                if (totalUs > 0 && nextUs >= totalUs) nextUs = 0;
-                ++damageSkips_;
-                if (damageSkips_ <= 5 || damageSkips_ % 20 == 0) {
-                    log::warn("media", std::format(
-                        "demuxer: EOF at {:.1f} s (of {:.1f} s) with tolerance on; probing {:.1f} s (skip #{}/{})",
-                        fromUs / 1e6, totalUs / 1e6, nextUs / 1e6, damageSkips_, kMaxDamageSkips));
-                }
-                if (damageSkips_ <= kMaxDamageSkips && seekToUs(nextUs)) continue;
-                log::warn("media", std::format("demuxer: no readable data left after {} probes; ending", damageSkips_));
-            }
+            // 跳段已关闭（理由见 MediaFileSource 里读到空洞时的注释）：自动跳段会
+            // 破坏音画同步，可靠的恢复手段是用户手动 seek。这里只清一次粘性错误，
+            // 让后续的读/seek 不被旧错误卡住，然后按真正的 EOF 处理。
+            // Hole-skipping is disabled (see the note in MediaFileSource): automatic jumps
+            // break A/V sync and a manual seek is the reliable recovery. Only clear the sticky
+            // error here so later reads/seeks are not blocked by a stale one, then treat this
+            // as a genuine EOF.
+            if (tolerant_) clearAvioError(context_);
             endOfFile = true;
             return false;
         }
@@ -524,31 +504,10 @@ bool FFmpegDemuxer::readVideoPacket(bool& endOfFile)
             // Advance by seek instead: skip a step and retry, bounded in both step size and
             // attempt count, or a hopelessly broken file would spin here for a long time.
             if (tolerant_) {
-                // 错误已经发生，先把它从 AVIOContext 上清掉，否则接下来的 seek 会把
-                // 这个旧错误继续抛出来。
-                // The error already happened: clear it off the AVIOContext first, or the
-                // upcoming seek keeps re-raising the stale one.
+                // 跳段已关闭：只清掉粘性错误，让调用方下次 seek/读不被它挡住。
+                // Hole-skipping is disabled: only clear the sticky error so the next
+                // read/seek from the caller is not blocked by it.
                 clearAvioError(context_);
-                if (++damageSkips_ <= kMaxDamageSkips) {
-                    ++stats_.damagedRegionsSkipped;
-                    const int64_t stepUs = kDamageSkipStepUs;
-                    const int64_t nowUs = packetAtUs_ >= 0 ? packetAtUs_ : 0;
-                    const int64_t nextUs = nowUs + stepUs;
-                    if (damageSkips_ <= 5 || damageSkips_ % 20 == 0) {
-                        char errorText[AV_ERROR_MAX_STRING_SIZE]{};
-                        av_strerror(result, errorText, sizeof(errorText));
-                        log::warn("media", std::format(
-                            "demuxer: damaged region (code={} text={}); skipping {:.1f} s ahead to {:.1f} s (skip #{}/{})",
-                            result, errorText, stepUs / 1e6, nextUs / 1e6,
-                            damageSkips_, kMaxDamageSkips));
-                    }
-                    if (seekToUs(nextUs)) continue;   // 从跳过后的位置重新读
-                    // seek 本身失败（比如超出时长）：不再重试，按原样报错。
-                    log::error("media", "demuxer: could not skip past the damaged region");
-                } else {
-                    log::error("media", std::format(
-                        "demuxer: giving up after {} damaged regions", kMaxDamageSkips));
-                }
             }
             char errorText[AV_ERROR_MAX_STRING_SIZE]{};
             av_strerror(result, errorText, sizeof(errorText));

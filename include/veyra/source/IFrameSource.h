@@ -140,19 +140,6 @@ public:
     virtual bool seek(const pipeline::Rational& targetSeconds) = 0;
 
     virtual void close() noexcept = 0;
-
-    // 容错播放时，source 会在内部跳过损坏的空洞区段（自动 seek）。这种情况下画面已经
-    // 跳到了新位置，但引擎不知道，音频还停在旧位置——实测音画差 200 秒后播放器自己
-    // 暂停了，用户看到的就是「seek 后只出一帧就不动了」。
-    // 引擎每帧读完之后取一次这个值：非 0 表示「刚刚内部跳到了这个微秒位置」，引擎据此
-    // 把音频也 seek 过去、并把画面历史重置掉。取过即清零。
-    // During tolerant playback a source may skip a damaged hole by seeking internally. The
-    // picture is then at a new position while the engine still believes the old one, so the
-    // audio stays behind - measured a 200 s A/V gap, after which the player paused itself
-    // ("after a seek only one frame shows"). The engine polls this after each read: a non-zero
-    // value means "we just jumped here internally", and it seeks the audio and resets picture
-    // history accordingly. Reading it clears it.
-    virtual int64_t consumePositionJumpUs() { return 0; }
 };
 
 } // namespace veyra::source
