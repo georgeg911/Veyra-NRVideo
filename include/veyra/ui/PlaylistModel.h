@@ -58,8 +58,6 @@ public:
     // Same, but tolerant about how a site page is written: tracking parameters and
     // query-item order are ignored, only host + path + the p value have to match.
     int indexOfSitePage(const QString& path) const;
-    // The address stored for a row, which is what setPlayback has to be given.
-    QString pathAtRow(int row) const;
     // Drop every site-page entry that belongs to a different video than the one
     // `path` points at, keeping local files untouched. Used when a new multi-part
     // video is sent: the previous video's parts would otherwise pile up and bury the
@@ -98,7 +96,7 @@ private:
                  // Used for site pages, where the title lives in the page and cannot
                  // be recovered from the URL.
                  QHash<QString, QString> names; };
-    struct Result { std::vector<Entry> entries; int skipped = 0; bool limited = false; };
+    struct Result { std::vector<Entry> entries; bool limited = false; };
     static QString keyOf(const QString& path);
     static void order(std::vector<Entry>& entries, int mode);
     Result scan(const Job& job, std::stop_token stop) const;

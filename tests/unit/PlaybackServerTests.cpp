@@ -65,5 +65,29 @@ int main(int argc, char** argv) {
     check(lastQuality==80,"quality reaches the handler");
     check(request(post(R"({"url":"https://example.com/b.mp4","quality":-1})")).startsWith("HTTP/1.1 200"),"page quality sentinel accepted");
     check(delivered==4&&lastQuality==0,"-1 collapses to best");
+    // parts（多P/合集分集）：合法条目按顺序送达，坏条目被丢弃但请求仍然成功。
+    // parts (multi-part / collection entries): good entries arrive in order, bad ones are
+    // dropped without failing the whole request.
+    lastParts.clear();
+    check(request(post(R"({"url":"https://example.com/v","parts":[
+        {"p":1,"title":"第一集","url":"https://example.com/e1"},
+        {"p":2,"title":"第二集","url":"https://example.com/e2"}]})")).startsWith("HTTP/1.1 200"),
+        "parts request accepted");
+    check(delivered==5,"parts request dispatches once");
+    check(lastParts.size()==2&&lastParts.at(0).title==QString::fromUtf8("第一集")&&
+          lastParts.at(1).url=="https://example.com/e2","parts arrive in order with titles");
+    lastParts.clear();
+    check(request(post(R"({"url":"https://example.com/v","parts":[
+        {"p":0,"title":"bad page","url":"https://example.com/x"},
+        {"p":1,"title":"file url","url":"file:///tmp/x"},
+        {"p":2,"title":"credentials","url":"https://u:p@example.com/y"},
+        {"p":3,"title":"good","url":"https://example.com/z"}]})")).startsWith("HTTP/1.1 200"),
+        "mixed parts request still accepted");
+    check(delivered==6&&lastParts.size()==1&&lastParts.at(0).title=="good",
+          "bad parts dropped, good part kept");
+    lastParts.clear();
+    check(request(post(R"({"url":"https://example.com/v","parts":"not-an-array"})")).startsWith("HTTP/1.1 200"),
+        "parts of the wrong type ignored");
+    check(delivered==7&&lastParts.isEmpty(),"wrong-typed parts yield no entries");
     std::cout<<checks<<" checks, "<<failed<<" failures\n";return failed?1:0;
 }

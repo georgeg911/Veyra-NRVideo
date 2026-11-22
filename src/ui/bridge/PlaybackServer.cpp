@@ -24,6 +24,16 @@ bool extensionOrigin(const QByteArray& origin){
     return id.size()==32&&std::all_of(id.begin(),id.end(),[](char c){return c>='a'&&c<='p';});
 }
 struct Pending{QByteArray bytes;qsizetype expected=-1;bool finished=false;};
+// 主 url 与每条 parts 用的是同一套规则：http/https、有 host、不带凭据、长度受限。
+// 抽出来共用，免得两处慢慢长成不一样（主 url 改了、parts 没跟上就是一类静默不一致）。
+// The main url and each parts entry follow the same rule: http/https, a host, no
+// embedded credentials, bounded length. Shared so the two cannot drift apart.
+bool validPlaybackUrl(const QString& text){
+    if(text.isEmpty()||text.size()>8192)return false;
+    const QUrl url(text,QUrl::StrictMode);
+    if(!url.isValid()||url.host().isEmpty()||!url.userInfo().isEmpty())return false;
+    return url.scheme()=="http"||url.scheme()=="https";
+}
 }
 PlaybackServer::PlaybackServer(PlayHandler handler,QObject* parent)
     :QObject(parent),handler_(std::move(handler)){
@@ -93,10 +103,7 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
     // the request invalid, or a signed-in browser could never hand a page over
     // (the af1b13a8 removal left that check in place with no reader for the value).
     const auto browserCookie=object.value("cookie").toString();
-    const QUrl parsed(url,QUrl::StrictMode);
-    if(error.error!=QJsonParseError::NoError||!doc.isObject()||!parsed.isValid()||
-       (parsed.scheme()!="http"&&parsed.scheme()!="https")||parsed.host().isEmpty()||
-       !parsed.userInfo().isEmpty()||url.size()>8192){
+    if(error.error!=QJsonParseError::NoError||!doc.isObject()||!validPlaybackUrl(url)){
         respond(socket,400,R"({"ok":false,"error":"invalid playback request"})",origin);return;
     }
     // The value is never used, but a CRLF in it would be a log-injection vector.
@@ -118,11 +125,7 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
                 const auto title = o.value("title").toString().trimmed();
                 const auto partUrl = o.value("url").toString().trimmed();
                 const int page = o.value("p").toInt(0);
-                if (page < 1 || partUrl.isEmpty() || partUrl.size() > 8192) continue;
-                const QUrl candidate(partUrl, QUrl::StrictMode);
-                if (!candidate.isValid() || candidate.host().isEmpty() ||
-                    (candidate.scheme() != "http" && candidate.scheme() != "https") ||
-                    !candidate.userInfo().isEmpty()) continue;
+                if (page < 1 || !validPlaybackUrl(partUrl)) continue;
                 parts.append(Part{page, title, partUrl});
             }
         }
@@ -131,7 +134,7 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
         if(handler)handler(url,quality,parts);
     },Qt::QueuedConnection);
     log::info("playback-server",std::format("play requested: host={} qn={} parts={}",
-                                            parsed.host().toStdString(),quality,parts.size()));
+                                            QUrl(url).host().toStdString(),quality,parts.size()));
     respond(socket,200,R"({"ok":true})",origin);
 }
 void PlaybackServer::onNewConnection(){

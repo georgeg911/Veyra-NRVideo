@@ -335,13 +335,10 @@ void QmlPlayerBridge::openPath(const QString& path) {
     // 1x1 swapchain.
     if (impl_->currentPage.isEmpty() || impl_->currentPage == QLatin1String("home"))
         emit navigate(QStringLiteral("pro"));
-    // A veyra:// URL is an instruction for this program, not a file and not a media
-    // address: FFmpeg has no such protocol, so replaying it on the next launch failed
-    // with "Protocol not found" (five times in the 2026-11-21 field log). The protocol
-    // handler already resolved the real address by the time openPath runs, so what is
-    // worth remembering is that resolved address, not the shell of the request.
-    const bool protocolRequest = path.startsWith(QStringLiteral("veyra://"), Qt::CaseInsensitive);
-    if(!network && !protocolRequest) rememberSource(QStringLiteral("file"), path);
+    // 这里只需要排除网络地址：veyra:// 在本函数开头就被拒绝了，走不到这行。
+    // Only network addresses need excluding here; a veyra:// URL was already rejected at
+    // the top of this function and never reaches this line.
+    if(!network) rememberSource(QStringLiteral("file"), path);
     if (impl_->preOpen) impl_->preOpen();
     auto options = impl_->options;
     if (!keepBilibiliStream) {
@@ -656,7 +653,7 @@ void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& 
             // address actually stored in the row, not the one that was searched for.
             const int row = playlist->indexOfSitePage(currentUrl);
             if (row >= 0) {
-                playlist->setPlayback(playlist->pathAtRow(row), QStringLiteral("playing"));
+                playlist->setPlayback(playlist->pathAt(row), QStringLiteral("playing"));
                 return;
             }
             if (++*attempts >= 60) return;   // ~3 s; give up quietly

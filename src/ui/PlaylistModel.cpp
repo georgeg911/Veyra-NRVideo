@@ -97,6 +97,18 @@ QString partOf(const QUrl& url) {
     const auto value = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
     return value.isEmpty() ? QStringLiteral("1") : value;
 }
+// 站点条目没有名字时的回退：BV 号 → host → 加 (P N)。scan() 和 load() 共用一份，
+// 否则两处会慢慢长成不一样的规则（列表里同一集显示两个名字）。
+// Fallback name for a site entry: BV id -> host -> add "(P N)". Shared by scan() and
+// load() so the two cannot drift into different rules for the same episode.
+QString fallbackSiteName(const QString& path) {
+    const QUrl url(path);
+    QString name = url.fileName();
+    if (name.isEmpty()) name = url.host();
+    const auto part = QUrlQuery(url).queryItemValue(QStringLiteral("p"));
+    if (!part.isEmpty()) name += QStringLiteral(" (P%1)").arg(part);
+    return name;
+}
 } // namespace
 
 QString PlaylistModel::keyOf(const QString& path) {
@@ -227,7 +239,7 @@ PlaylistModel::Result PlaylistModel::scan(const Job& job, std::stop_token stop) 
     int examined = 0;
     auto cancelled = [&] { return stop.stop_requested() || job.generation != generation_.load(); };
     auto file = [&](const QFileInfo& info) {
-        if (!info.isFile() || !supported(info.filePath()) || reparse(info)) { ++result.skipped; return; }
+        if (!info.isFile() || !supported(info.filePath()) || reparse(info)) return;
         const auto path = normalizedPath(info.absoluteFilePath()), key = keyOf(path);
         if (found.contains(key)) return;
         found.insert(key);
@@ -245,12 +257,7 @@ PlaylistModel::Result PlaylistModel::scan(const Job& job, std::stop_token stop) 
             // A name supplied by the caller wins: for a site page that is the title
             // the site shows, which the URL alone cannot reproduce.
             QString name = job.names.value(path);
-            if (name.isEmpty()) {
-                name = QUrl(path).fileName();
-                if (name.isEmpty()) name = QUrl(path).host();
-                const QString part = QUrlQuery(QUrl(path)).queryItemValue(QStringLiteral("p"));
-                if (!part.isEmpty()) name += QStringLiteral(" (P%1)").arg(part);
-            }
+            if (name.isEmpty()) name = fallbackSiteName(path);
             result.entries.push_back({path, name, key, 0, 0});
             if (int(result.entries.size()) >= maxEntries) { result.limited = true; break; }
             continue;
@@ -360,10 +367,6 @@ int PlaylistModel::indexOfSitePage(const QString& path) const {
         if (entries_[i].key == wantedKey) return i;
     }
     return -1;
-}
-QString PlaylistModel::pathAtRow(int row) const {
-    if (row < 0 || row >= count()) return {};
-    return entries_[row].path;
 }
 void PlaylistModel::retainSiteVideos(const QStringList& keepPaths) {
     // 按「视频」而不是「分P」保留：合集里同一视频的多集要一起留下，所以键里不带分P。
@@ -513,12 +516,7 @@ void PlaylistModel::load() {
         if (network) {
             // A saved name wins: it is the site's own title, which the URL cannot give.
             name = entry.value("name").toString().trimmed();
-            if (name.isEmpty()) {
-                name = QUrl(normalized).fileName();
-                if (name.isEmpty()) name = QUrl(normalized).host();
-                const QString part = QUrlQuery(QUrl(normalized)).queryItemValue(QStringLiteral("p"));
-                if (!part.isEmpty()) name += QStringLiteral(" (P%1)").arg(part);
-            }
+            if (name.isEmpty()) name = fallbackSiteName(normalized);
         } else {
             name = QFileInfo(normalized).fileName();
         }
