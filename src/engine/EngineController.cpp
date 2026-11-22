@@ -1741,7 +1741,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         audioPipe.stopThread();
                         bool reopened=false;
                         try{
-                            reopened=audioPipe.open(audioTarget,&stop_,options.network.requestHeaders,options.network.userAgent);
+                            reopened=audioPipe.reopen(audioTarget,&stop_,options.network.requestHeaders,options.network.userAgent);
                         }catch(const std::exception& e){
                             veyra::log::error("buffering-gate",std::format("audio reopen threw: {}",e.what()));
                         }
@@ -1773,7 +1773,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                     if(candidate.empty()||candidate==audioTarget)continue;
                                     bool mirrorOpened=false;
                                     try{
-                                        mirrorOpened=audioPipe.open(candidate,&stop_,
+                                        mirrorOpened=audioPipe.reopen(candidate,&stop_,
                                             options.network.requestHeaders,options.network.userAgent);
                                     }catch(const std::exception& e){
                                         veyra::log::error("buffering-gate",std::format(
@@ -1800,9 +1800,32 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 watchdog_->beat();
                             }else{
                             veyra::log::error("buffering-gate","audio address could not be reopened");
-                            // 重连也失败：这次会话没有可用的声音了。把音频从时钟与闸门里摘掉，
+                            // 重连失败不代表这条会话完了：拔网线时第一次重连必然失败，
+                            // 网络回来之前谁也没法成功。原来这里直接 abandon（并把音轨从
+                            // 时钟里摘掉），于是网线插回来也再没有第二次机会 —— 现场
+                            // 2026-11-22 复现：断网 → 一次重连失败 → 之后一直静音，只有
+                            // 手动 seek 能救。
+                            // 现在分两种：重连预算还没用完就退回「等待恢复」，让 gate 在
+                            // 下一次音频水位下跌时再试；预算用完了才真正放弃并静音。
+                            // A failed reopen does not end the session: unplugging the cable
+                            // guarantees the first attempt fails, and nothing can succeed
+                            // before the network returns. This used to abandon() outright
+                            // (and drop the track from the clock), so replugging could never
+                            // help - field log 2026-11-22: unplug -> one failed reopen ->
+                            // silent for good, only a manual seek recovered.
+                            // Now: if the reconnect budget is not spent, fall back to
+                            // "waiting for recovery" so the gate tries again on the next dry
+                            // reading; only a spent budget really gives up and mutes.
+                            const bool budgetLeft=bufferingGate.reconnects()<bufferingGate.limits().reconnectBudget;
+                            if(budgetLeft){
+                                bufferingGate.retryLater();
+                                veyra::log::warn("buffering-gate",std::format(
+                                    "audio still unreachable; will retry (reconnects={}/{})",
+                                    bufferingGate.reconnects(),bufferingGate.limits().reconnectBudget));
+                            }else{
+                            // 重连预算用尽：这次会话没有可用的声音了。把音频从时钟与闸门里摘掉，
                             // 否则水位恒为 0，闸门会永远保持，用户点播放只看到冻结的画面。
-                            // Reopening failed too: this session has no usable sound left. Take the
+                            // Reconnect budget spent: this session has no usable sound left. Take the
                             // audio out of the clock and the gate, or a zero water level holds the
                             // picture for ever and pressing play changes nothing.
                             audioStarted=false;
@@ -1810,6 +1833,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             {
                                 std::lock_guard lock(mutex_);
                                 snapshot_.audioAvailable=false;   // 界面上也不要再声称有声音
+                            }
                             }
                             }
                         }

@@ -37,6 +37,21 @@ AudioPipeline::~AudioPipeline()
 bool AudioPipeline::open(const std::wstring& path,const std::atomic<bool>* cancelled,
                          const std::wstring& requestHeaders,const std::wstring& userAgent)
 {
+    return openImpl(path,&stopFlag_,cancelled,requestHeaders,userAgent,false);
+}
+bool AudioPipeline::reopen(const std::wstring& path,const std::atomic<bool>* cancelled,
+                           const std::wstring& requestHeaders,const std::wstring& userAgent)
+{
+    // 重连走短预算：这条路径在引擎主循环上同步执行，长预算会冻住画面。
+    // Reconnect uses the short budget: this path runs synchronously on the engine's main
+    // loop, and a long budget freezes the picture.
+    return openImpl(path,&stopFlag_,cancelled,requestHeaders,userAgent,true);
+}
+bool AudioPipeline::openImpl(const std::wstring& path,const std::atomic<bool>* localStop,
+                             const std::atomic<bool>* cancelled,
+                             const std::wstring& requestHeaders,const std::wstring& userAgent,
+                             bool shortBudget)
+{
     if(path.empty())return false;
     // The shared-session overload refuses to open while a thread is still running;
     // this one has to do the same. Starting a second thread over a live one is what
@@ -69,7 +84,7 @@ bool AudioPipeline::open(const std::wstring& path,const std::atomic<bool>* cance
     // Remember whether this is a network target: a DASH source's audio is its own CDN
     // request opened here, with session_ null, so the tolerance check needs this flag.
     networkTarget_ = media::networkMediaInput(path);
-    inputInterrupt_.configure(media::networkMediaInput(path),cancelled,&stopFlag_);
+    inputInterrupt_.configure(media::networkMediaInput(path),cancelled,localStop);
     fmt_->interrupt_callback={media::InputInterrupt::callback,&inputInterrupt_};
     AVDictionary* options=nullptr;
     if(media::networkMediaInput(path)){
@@ -78,7 +93,7 @@ bool AudioPipeline::open(const std::wstring& path,const std::atomic<bool>* cance
         // Referer/UA the video one carries; the shared helper spells them.
         media::networkMediaHeaders(&options,requestHeaders,userAgent);
     }
-    inputInterrupt_.armConnect();
+    if(shortBudget) inputInterrupt_.armConnectShort(); else inputInterrupt_.armConnect();
     const int opened=avformat_open_input(&fmt_,narrow.c_str(),nullptr,&options);
     av_dict_free(&options);
     if(opened<0)return false;

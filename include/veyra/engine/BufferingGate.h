@@ -36,7 +36,11 @@ struct BufferingGateLimits {
     // 保持这么久还没恢复：这是连接断了，不是慢。
     long long reconnectAfterMs = 5000;
     // 一次播放允许重连几次；用完就放弃，把选择权交回用户。
-    int reconnectBudget = 2;
+    // 从 2 提到 4：拔网线时前几次必然失败（网络还没回来），2 次预算在一次断网里就烧光了。
+    // How many reconnects one playback may use before giving up and leaving it to the user.
+    // 2 -> 4: unplugging the cable makes the first attempts fail by definition, so a budget
+    // of 2 was spent inside a single outage.
+    int reconnectBudget = 4;
 };
 
 class BufferingGate {
@@ -94,6 +98,22 @@ public:
     // Called when reopening failed as well: release the hold but keep "gave up", so the
     // engine can tell the user once and the picture is not frozen for good.
     void abandon() { holding_ = false; gaveUp_ = true; }
+
+    // 重连失败后重新回到「等待恢复」的状态，而不是直接放弃。
+    // 拔网线时第一次重连必然失败（网络还没回来），若就此 abandon，网线插回来也再没有
+    // 第二次机会 —— 现场 2026-11-22：断网 → 重连失败 → 之后一直静音，只有手动 seek 能救。
+    // 这里把保持状态清掉、保留已用的重连次数（所以总次数仍受 reconnectBudget 约束），
+    // 让下一轮水位下降时可以再试一次。
+    // Back to "waiting for recovery" instead of giving up. Pulling the cable guarantees the
+    // first reopen fails (the network is not back yet); abandoning there means plugging it
+    // back in can never help - field log 2026-11-22: unplug -> reopen failed -> silent for
+    // good, only a manual seek recovered. Clear the hold but keep the used reconnect count,
+    // so the total is still bounded by reconnectBudget, and let the next dry reading retry.
+    void retryLater() {
+        holding_ = false;
+        gaveUp_ = false;
+        sinceMs_ = 0;   // 0 表示「下一次读数为低时重新计时」
+    }
 
     // 跳转或换音轨之后调用：缓冲会先被清空再重新填，这段不该被当成「断了」。
     // 只重置宽限期与保持状态，**不动**重连计数 —— 否则一次断流可以被无限重连。

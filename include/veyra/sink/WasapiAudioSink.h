@@ -85,6 +85,22 @@ public:
     // needs the same headers the video one carries.
     bool open(const std::wstring& path,const std::atomic<bool>* cancelled=nullptr,
               const std::wstring& requestHeaders={},const std::wstring& userAgent={});
+    // 断线重连专用：用短连接预算（kReconnectTimeoutMs）。重连跑在引擎主循环上，
+    // 用首次打开的 40 秒预算会把画面冻住几十秒；重连试不通就该换下一个镜像。
+    // For reconnect after a drop: a short connect budget. A reopen runs on the engine's
+    // main loop, and the 40 s first-open budget would freeze the picture; an address that
+    // does not answer promptly should be skipped in favour of the next mirror.
+    bool reopen(const std::wstring& path,const std::atomic<bool>* cancelled=nullptr,
+                const std::wstring& requestHeaders={},const std::wstring& userAgent={});
+private:
+    // open() 与 reopen() 的公共实现：唯一差别是连接预算与取消标志的来源。
+    // Shared body of open()/reopen(): they differ only in the connect budget and in
+    // where the cancellation flag comes from.
+    bool openImpl(const std::wstring& path,const std::atomic<bool>* localStop,
+                  const std::atomic<bool>* cancelled,
+                  const std::wstring& requestHeaders,const std::wstring& userAgent,
+                  bool shortBudget);
+public:
     // Network sources and files on a server: take audio packets from the shared demux
     // session that also feeds the video (one connection, #48) instead of opening the
     // address a second time.

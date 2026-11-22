@@ -16,6 +16,14 @@ namespace veyra::media {
 // Opening a connection and reading media now have separate limits; the owner's
 // cancel flag (stop / source switch) still aborts every blocking call at once.
 constexpr int kConnectTimeoutMs = 40000;     // avformat_open_input as a whole (a dead connection is cut at 15 s by rw_timeout)
+// 重连用的短预算。断网时重连是在引擎的主循环线程上同步做的，40 秒的预算会把画面冻住
+// 几十秒（现场 2026-11-22 实测 stall 38 秒、连续写 minidump）。重连本来就只是「再试一次
+// 这个地址」，试不通就换下一个，不该按首次打开的标准等。
+// Short budget for reconnects. A reopen runs synchronously on the engine's main loop, so
+// the 40 s open budget freezes the picture for tens of seconds (measured 2026-11-22: a
+// 38 s stall and repeated minidumps). A reopen is just "try this address again" - when it
+// does not answer quickly, move to the next one.
+constexpr int kReconnectTimeoutMs = 6000;
 constexpr int kProbeTimeoutMs = 30000;       // avformat_find_stream_info
 constexpr int kReadTimeoutVodMs = 20000;     // one av_read_frame / seek on a seekable source
 constexpr int kReadTimeoutLiveMs = 10000;    // one av_read_frame on a live source
@@ -52,6 +60,9 @@ public:
     // Read / seek deadline.
     void arm(){deadline_=network_?now()+int64_t(live_?kReadTimeoutLiveMs:kReadTimeoutVodMs)*1000000ll:0;}
     void armConnect(){deadline_=network_?now()+int64_t(kConnectTimeoutMs)*1000000ll:0;}
+    // 重连路径：用短预算，别把主循环冻住几十秒。
+    // Reconnect path: a short budget so the main loop is not frozen for tens of seconds.
+    void armConnectShort(){deadline_=network_?now()+int64_t(kReconnectTimeoutMs)*1000000ll:0;}
     void armProbe(){deadline_=network_?now()+int64_t(kProbeTimeoutMs)*1000000ll:0;}
     void disarm(){deadline_=0;}
     static int callback(void* opaque){
