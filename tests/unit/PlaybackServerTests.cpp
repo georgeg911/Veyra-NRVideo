@@ -48,7 +48,10 @@ int main(int argc, char** argv) {
     check(request(post(body,"Host: "+host+"\r\n")).startsWith("HTTP/1.1 400"),"duplicate host");
     check(request(post(body,"Content-Length: 0\r\n")).startsWith("HTTP/1.1 400"),"duplicate length");
     check(request("POST /play HTTP/1.1\r\nHost: "+host+"\r\n\r\n").startsWith("HTTP/1.1 411"),"missing length");
-    check(request("POST /play HTTP/1.1\r\nHost: "+host+"\r\nContent-Length: 65537\r\n\r\n").startsWith("HTTP/1.1 413"),"bounded body");
+    // maxBody 现在是 256 KB（要给多P 分集留空间），所以这里用一个明确超过它的长度。
+    // maxBody is 256 KB now (multi-part payloads need the room), so use a length clearly
+    // past it.
+    check(request("POST /play HTTP/1.1\r\nHost: "+host+"\r\nContent-Length: 262145\r\n\r\n").startsWith("HTTP/1.1 413"),"bounded body");
     check(request("GET /ping HTTP/1.1\r\nHost: "+host+"\r\nX: "+QByteArray(9000,'a')).startsWith("HTTP/1.1 413"),"bounded headers");
     check(request(post(body,"Transfer-Encoding: chunked\r\n")).startsWith("HTTP/1.1 400"),"chunked denied");
     check(request(post("{bad")).startsWith("HTTP/1.1 400"),"invalid JSON");
@@ -89,5 +92,33 @@ int main(int argc, char** argv) {
     check(request(post(R"({"url":"https://example.com/v","parts":"not-an-array"})")).startsWith("HTTP/1.1 200"),
         "parts of the wrong type ignored");
     check(delivered==7&&lastParts.isEmpty(),"wrong-typed parts yield no entries");
+    // 多P/合集的规模保护。195 集是真实上限附近的规模（约 33 KB），必须能过；
+    // 超过条数上限只截断、不拒绝请求，因为播放本身只需要 url。
+    // Scale guards for multi-part payloads. 195 entries (~33 KB) is the realistic size and
+    // must pass; past the entry cap the list is truncated but the request still succeeds,
+    // because playback only needs `url`.
+    {
+        QString big = R"({"url":"https://example.com/v","parts":[)";
+        for (int i = 0; i < 195; ++i) {
+            if (i) big += ',';
+            big += QStringLiteral(R"({"p":%1,"title":"第%1讲","url":"https://example.com/p%1"})").arg(i + 1);
+        }
+        big += "]}";
+        lastParts.clear();
+        check(request(post(big.toUtf8())).startsWith("HTTP/1.1 200"), "195 parts accepted");
+        check(delivered==8&&lastParts.size()==195, "195 parts delivered");
+    }
+    {
+        QString huge = R"({"url":"https://example.com/v","parts":[)";
+        for (int i = 0; i < 2500; ++i) {
+            if (i) huge += ',';
+            huge += QStringLiteral(R"({"p":%1,"title":"t","url":"https://e.x/%1"})").arg(i + 1);
+        }
+        huge += "]}";
+        lastParts.clear();
+        const auto reply = request(post(huge.toUtf8()));
+        check(reply.startsWith("HTTP/1.1 200"), "oversized parts list still succeeds");
+        check(delivered==9&&lastParts.size()==2000, "parts truncated at the cap");
+    }
     std::cout<<checks<<" checks, "<<failed<<" failures\n";return failed?1:0;
 }

@@ -16,7 +16,20 @@
 
 namespace veyra::ui {
 namespace {
-constexpr qsizetype maxHeaders=8192,maxBody=65536;
+constexpr qsizetype maxHeaders=8192;
+// 64 KB 对「多P/合集分集」不够用：/play 的 parts 每条约 175 字节（真实数据 195 集 =
+// 33 KB），500 集就要 85 KB，会被当成请求过大拒掉——用户看到的是「发送失败」。
+// 提到 256 KB：按真实带宽算能容纳约 1500 条，同时仍是有限的上限，不会被单个请求打爆。
+// 64 KB was not enough for multi-part / collection payloads: each parts entry is about
+// 175 bytes (measured: 195 parts = 33 KB), so 500 parts needs 85 KB and was rejected as
+// "request too large". 256 KB holds about 1500 entries at that rate and stays a bounded
+// limit.
+constexpr qsizetype maxBody=262144;
+// 单次请求最多接受的分集条数。与 maxBody 互相兜底：条目被填得极短时由条数拦住，
+// 条数不多但 URL 极长时由体积拦住。
+// Upper bound on parts entries per request. Complements maxBody: a flood of tiny entries
+// is caught here, a few enormous ones by the size limit.
+constexpr int maxParts=2000;
 bool extensionOrigin(const QByteArray& origin){
     constexpr auto prefix="chrome-extension://";
     if(!origin.startsWith(prefix))return false;
@@ -121,6 +134,15 @@ void PlaybackServer::handleRequest(QTcpSocket* socket,const QByteArray& request)
         const auto list = object.value("parts");
         if (list.isArray()) {
             for (const auto& value : list.toArray()) {
+                if (parts.size() >= maxParts) {
+                    // 条数保护：不拒绝请求（播放仍需要 url），只停止继续收。
+                    // 与体积上限互补——条目被填得极短时体积拦不住。
+                    // Entry cap: keep the request valid (playback only needs `url`) and stop
+                    // collecting. Complements the body limit when entries are tiny.
+                    log::warn("playback-server", std::format(
+                        "parts truncated at {} entries", maxParts));
+                    break;
+                }
                 const auto o = value.toObject();
                 const auto title = o.value("title").toString().trimmed();
                 const auto partUrl = o.value("url").toString().trimmed();
