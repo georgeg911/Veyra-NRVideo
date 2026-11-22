@@ -480,17 +480,33 @@ bool FFmpegDemuxer::readVideoPacket(bool& endOfFile)
             // file a hole reads as all-zero bytes, the demuxer finds no next packet and
             // reports EOF - while real data exists further on. Walk forward: if a packet
             // turns up, continue; give up only when the skip budget is spent.
-            if (tolerant_ && damageSkips_ < kMaxDamageSkips) {
+            if (tolerant_) {
                 clearAvioError(context_);
                 const int64_t fromUs = packetAtUs_ >= 0 ? packetAtUs_ : 0;
-                const int64_t nextUs = fromUs + kDamageSkipStepUs;
+                const int64_t totalUs = durationUs();
+                // 跳到「最远有数据的地方」而不是一路往后加：稀疏文件的空洞能占大半个
+                // 文件，从空洞里往后每 30 秒试一次会直接试到文件末尾，然后永远 EOF
+                // （实测 40 次探测全在 9413 s 处空转，画面就此结束）。
+                // 这里的做法是重新从头找：空洞之后没有数据时，唯一还有数据的地方在
+                // 前面。所以把搜索位置回绕到 0，从头再走一遍——已经播过的部分会很快
+                // 因为缓存/顺序读跳过，找到的就还是那片有数据的区域。
+                // Jump to "the furthest place that has data" instead of walking forward:
+                // holes in a sparse file can span most of it, so trying +30 s at a time from
+                // inside one walks straight to EOF and then EOFs for ever (measured: all 40
+                // probes stuck at 9413 s and playback ended there). When nothing follows a
+                // hole the only data left is before it, so wrap back to the start and walk
+                // again - the part already played passes quickly and we land on the same
+                // usable region.
+                int64_t nextUs = fromUs + kDamageSkipStepUs;
+                if (totalUs > 0 && nextUs >= totalUs) nextUs = 0;
                 ++damageSkips_;
                 if (damageSkips_ <= 5 || damageSkips_ % 20 == 0) {
                     log::warn("media", std::format(
-                        "demuxer: EOF at {:.1f} s but tolerance is on; probing {:.1f} s (skip #{}/{})",
-                        fromUs / 1e6, nextUs / 1e6, damageSkips_, kMaxDamageSkips));
+                        "demuxer: EOF at {:.1f} s (of {:.1f} s) with tolerance on; probing {:.1f} s (skip #{}/{})",
+                        fromUs / 1e6, totalUs / 1e6, nextUs / 1e6, damageSkips_, kMaxDamageSkips));
                 }
-                if (seekToUs(nextUs)) continue;
+                if (damageSkips_ <= kMaxDamageSkips && seekToUs(nextUs)) continue;
+                log::warn("media", std::format("demuxer: no readable data left after {} probes; ending", damageSkips_));
             }
             endOfFile = true;
             return false;
