@@ -645,14 +645,30 @@ VPage {
                         VRow {
                             // 百分比，与「设置 → 播放 → B 站字幕」里的同名字幕大小共用
                             // subtitleSize 这个键；两边改一个另一个跟着变。
+                            // 档位从 4 个扩到 7 个：原来越过 125% 下一档就是 150%，中间
+                            // 差太多；90/110 补上小步微调，200% 给视力不好的用户。
+                            // 范围受 Preferences 的 subtitleSize {16,56} 限制——75% 正好是
+                            // 16px 下限，所以不能再往下加。
                             label: qsTr("字幕大小")
                             hint: qsTr("相对默认大小的百分比；双行不自动缩小")
                             VSeg {
                                 objectName: "set-subsize"
                                 readonly property int size: veyra.preferences.subtitleSize || 22
-                                options: [{ id: "75", label: qsTr("75%") }, { id: "100", label: qsTr("100%") },
-                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") }]
-                                current: String(Math.round(size / 22 * 100 / 25) * 25)
+                                options: [{ id: "75", label: qsTr("75%") }, { id: "90", label: qsTr("90%") },
+                                          { id: "100", label: qsTr("100%") }, { id: "110", label: qsTr("110%") },
+                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") },
+                                          { id: "200", label: qsTr("200%") }]
+                                // 就近吸附：存的是 px，换成百分比后取最接近的一档，避免
+                                // 手动改过 px 值时 current 落空（那样指示器会消失）。
+                                current: {
+                                    var pct = size / 22 * 100
+                                    var best = 100, dist = 1e9
+                                    for (var i = 0; i < options.length; ++i) {
+                                        var d = Math.abs(Number(options[i].id) - pct)
+                                        if (d < dist) { dist = d; best = Number(options[i].id) }
+                                    }
+                                    return String(best)
+                                }
                                 onPicked: id => veyra.setPreference("subtitleSize", Math.round(Number(id) / 100 * 22))
                             }
                         }
@@ -988,17 +1004,26 @@ VPage {
                             }
                         }
                         VRow {
-                            // 同一个 subtitleSize 键：字幕大小是播放器级设置，不是 B 站专属，
-                            // 放在这里是因为用户是在调 B 站字幕时想改它。设置页别处的
-                            // 「字幕默认字号」读写的是同一个值，两边保持同步。
+                            // 同一个 subtitleSize 键，和「设置 → 播放 → 字幕大小」双向同步。
+                            // 档位、吸附逻辑与那处保持一致（改一处务必改另一处）。
                             label: qsTr("字幕大小")
                             hint: qsTr("相对默认大小的百分比；中 = 100%")
                             VSeg {
                                 objectName: "set-bili-subtitle-scale"
                                 readonly property int size: veyra.preferences.subtitleSize || 22
-                                options: [{ id: "75", label: qsTr("75%") }, { id: "100", label: qsTr("100%") },
-                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") }]
-                                current: String(Math.round(size / 22 * 100 / 25) * 25)
+                                options: [{ id: "75", label: qsTr("75%") }, { id: "90", label: qsTr("90%") },
+                                          { id: "100", label: qsTr("100%") }, { id: "110", label: qsTr("110%") },
+                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") },
+                                          { id: "200", label: qsTr("200%") }]
+                                current: {
+                                    var pct = size / 22 * 100
+                                    var best = 100, dist = 1e9
+                                    for (var i = 0; i < options.length; ++i) {
+                                        var d = Math.abs(Number(options[i].id) - pct)
+                                        if (d < dist) { dist = d; best = Number(options[i].id) }
+                                    }
+                                    return String(best)
+                                }
                                 onPicked: id => veyra.setPreference("subtitleSize", Math.round(Number(id) / 100 * 22))
                             }
                         }
