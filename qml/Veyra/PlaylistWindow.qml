@@ -40,6 +40,17 @@ Window {
         show(); raise(); requestActivate()
     }
     function toggle() { if (visible) hide(); else open() }
+    // 打开时滚到正在播放的那一行。列表一长，当前项常常在视口之外，用户只看得到
+    // 开头几项，会以为「没有高亮、没有正在播放」——其实标记在下面看不到。延后一帧
+    // 是因为这时候 delegate 可能还没建好，positionViewAtIndex 会落空。
+    function revealCurrent() {
+        if (playlist.currentIndex < 0) return
+        Qt.callLater(function() { list.positionViewAtIndex(playlist.currentIndex, ListView.Contain) })
+    }
+    onVisibleChanged: {
+        if (!visible) finishDrag(false)
+        else revealCurrent()
+    }
     function removeSelected() {
         const row = playlist.indexOfPath(selectedPath)
         if (row >= 0) playlist.remove(row)
@@ -58,7 +69,6 @@ Window {
         dragging = false; dragPath = ""
     }
     onClosing: event => { event.accepted = false; hide() }
-    onVisibleChanged: if (!visible) finishDrag(false)
     Connections {
         target: win.playlist
         function onError(text) { win.failure = text; errorTimer.restart() }
@@ -174,7 +184,8 @@ Window {
                         width: list.width - 10; height: 64; radius: 9
                         color: win.selectedPath === entryPath ? Theme.card3 : entryCurrent ? Theme.accentSoft : rowMouse.containsMouse ? Theme.card2 : "transparent"
                         border.width: 1
-                        border.color: win.dragging && win.dragPath === entryPath ? Theme.accent : "transparent"
+                        border.color: entryCurrent ? Theme.accent
+                                      : win.dragging && win.dragPath === entryPath ? Theme.accent : "transparent"
                         MouseArea {
                             id: rowMouse
                             objectName: "playlist-select-" + row.index
@@ -236,7 +247,16 @@ Window {
                                     font.pixelSize: 10
                                 }
                             }
-                            Text { Layout.fillWidth: true; text: row.entrySize + " · " + row.entryModified; color: Theme.t3; elide: Text.ElideRight; font.pixelSize: 10 }
+                            // A site page has no size and no date; the model returns an
+                            // empty date for it, so join only what exists instead of
+                            // leaving a dangling separator.
+                            Text {
+                                Layout.fillWidth: true
+                                text: row.entryModified.length > 0
+                                      ? row.entrySize + " · " + row.entryModified
+                                      : row.entrySize
+                                color: Theme.t3; elide: Text.ElideRight; font.pixelSize: 10
+                            }
                         }
                         VButton {
                             objectName: "playlist-remove-" + row.index
