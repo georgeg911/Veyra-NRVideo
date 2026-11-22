@@ -316,7 +316,17 @@ $go.addEventListener('click', async () => {
         // newlines. The whole thing is URL-encoded inside a single parameter so the
         // protocol handler can hand it to the same /play path the HTTP route uses.
         const packed = parts.map(x => `${x.p}|${x.title}|${x.url}`).join('\n');
-        link += `&parts=${encodeURIComponent(packed)}`;
+        // 协议启动走的是命令行，Windows 上限 32767 字符。中文标题编码后每字 9 字符，
+        // 实测 195 集约 38000 字符——超限会让协议启动直接失败（没有报错提示）。
+        // 超限时干脆不带 parts：Veyra 会自己走 resolveBilibiliStream 的 data.pages
+        // 兜底，标题退化成站内 part 字段，但分集和播放都正常。
+        // The protocol launch passes through a command line, capped at 32767 chars on
+        // Windows. A CJK title costs 9 chars once encoded, and 195 parts measured ~38000 -
+        // over the limit, which makes the launch fail with no error shown. When it does not
+        // fit, drop `parts`: Veyra falls back to data.pages from its own resolver, the
+        // titles degrade to the site's `part` field, but the parts and playback still work.
+        const withParts = link + `&parts=${encodeURIComponent(packed)}`;
+        link = withParts.length <= 8000 ? withParts : link;
       }
       setStatus(parts.length > 1
         ? `Veyra 未运行，正在通过协议启动…（${parts.length} 个分 P）`
