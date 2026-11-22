@@ -271,7 +271,50 @@ curl -s -X POST http://127.0.0.1:18765/play -H "Content-Type: application/json" 
 [audio] pipeline started separateAudio=1
 ```
 
-### 6.3 测试环境变量必须干净
+### 6.3 断网自愈验证（定制功能）
+
+**真实测法**（用户验证过，最可信）：播 B 站视频 → 拔 Wi-Fi 或关路由 5-10 秒 → 恢复。
+期望：不用点任何东西，约 5-6 秒内声音和画面都自己接上。
+
+**自动化测法**（不想断真网时）：
+
+```powershell
+# 让音频读取每 12 秒卡 8 秒，等效于短暂断流
+$env:VEYRA_TEST_AUDIO_READ_STALL_MS = "8000"
+$env:VEYRA_TEST_AUDIO_READ_STALL_EVERY_MS = "12000"
+# 启动并播放，然后观察日志
+```
+
+日志里应该出现这一串（缺哪条就说明卡在哪一步）：
+
+```
+buffering-gate: audio running dry           ← 缓冲耗尽，门开始介入
+buffering-gate: audio edge switch: mirror N/4
+buffering-gate: reopening the audio address (attempt N)
+buffering-gate: audio reopened; continuing at NNNNN ms
+seek-latency: request=N targetSeconds=NN.NNN
+seek-latency: request=N firstPresentMs=NNN ptsMs=...   ← 画面重新出帧
+```
+
+**判定标准**：
+
+| 检查项 | 期望 |
+|---|---|
+| `audio reopened` | 必须出现 |
+| `seek-latency firstPresentMs` | 必须出现（画面跟上） |
+| `engine-hang stalledMs=` | 应为 0 条 |
+| `qml-frames main=` | 400-700（低于 200 说明画面卡） |
+
+失败时的对照表：
+
+| 缺什么 | 卡在哪 |
+|---|---|
+| 只有 `closing the track` | 音轨被关，走不到重连（`WasapiAudioSink.cpp` 的 `networkRead` 分支） |
+| `could not be reopened` 之后无动作 | 重连失败后放弃了（`retryLater()` / 预算） |
+| `audio reopened` 但没有 `seek-latency` | 没走自动 seek（`EngineController.cpp` 重连成功后那段） |
+| 有 `engine-hang` | 重连阻塞主线程（`kReconnectTimeoutMs`） |
+
+### 6.4 测试环境变量必须干净
 
 ```powershell
 python -c "import os;print([k for k in os.environ if k.startswith('VEYRA_TEST')])"
