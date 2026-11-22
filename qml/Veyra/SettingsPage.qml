@@ -643,14 +643,17 @@ VPage {
 
                         }
                         VRow {
-                            label: qsTr("字幕默认字号")
-                            hint: qsTr("双行不自动缩小；更多样式在字幕设置里")
+                            // 百分比，与「设置 → 播放 → B 站字幕」里的同名字幕大小共用
+                            // subtitleSize 这个键；两边改一个另一个跟着变。
+                            label: qsTr("字幕大小")
+                            hint: qsTr("相对默认大小的百分比；双行不自动缩小")
                             VSeg {
                                 objectName: "set-subsize"
                                 readonly property int size: veyra.preferences.subtitleSize || 22
-                                options: [{ id: "18", label: qsTr("小") }, { id: "22", label: qsTr("中") }, { id: "28", label: qsTr("大") }]
-                                current: size <= 19 ? "18" : size >= 26 ? "28" : "22"
-                                onPicked: id => veyra.setPreference("subtitleSize", Number(id))
+                                options: [{ id: "75", label: qsTr("75%") }, { id: "100", label: qsTr("100%") },
+                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") }]
+                                current: String(Math.round(size / 22 * 100 / 25) * 25)
+                                onPicked: id => veyra.setPreference("subtitleSize", Math.round(Number(id) / 100 * 22))
                             }
                         }
                         VRow {
@@ -982,6 +985,21 @@ VPage {
                                 objectName: "set-bili-subtitles"
                                 checked: veyra.preferences.biliSubtitles === true
                                 onToggled: checked => veyra.setPreference("biliSubtitles", checked)
+                            }
+                        }
+                        VRow {
+                            // 同一个 subtitleSize 键：字幕大小是播放器级设置，不是 B 站专属，
+                            // 放在这里是因为用户是在调 B 站字幕时想改它。设置页别处的
+                            // 「字幕默认字号」读写的是同一个值，两边保持同步。
+                            label: qsTr("字幕大小")
+                            hint: qsTr("相对默认大小的百分比；中 = 100%")
+                            VSeg {
+                                objectName: "set-bili-subtitle-scale"
+                                readonly property int size: veyra.preferences.subtitleSize || 22
+                                options: [{ id: "75", label: qsTr("75%") }, { id: "100", label: qsTr("100%") },
+                                          { id: "125", label: qsTr("125%") }, { id: "150", label: qsTr("150%") }]
+                                current: String(Math.round(size / 22 * 100 / 25) * 25)
+                                onPicked: id => veyra.setPreference("subtitleSize", Math.round(Number(id) / 100 * 22))
                             }
                         }
                         VRow {
