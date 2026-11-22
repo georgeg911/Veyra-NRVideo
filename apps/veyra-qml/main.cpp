@@ -783,32 +783,39 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     // Custom (Chrome bridge): local HTTP endpoint the browser extension posts to.
     // 127.0.0.1 only; port 18765 is fixed so the extension can find it without
     // reading anything off disk (a browser cannot open local files).
-    ui::PlaybackServer playbackServer([&bridge](const QString& url, int quality,
-                                               const QList<ui::PlaybackServer::Part>& parts){
+    // HTTP 路径与协议路径做的是同一件事：前置、把页面给的分集排进播放列表、再打开。
+    // 合成一处，免得两边语义漂移。
+    // Both entry points do the same thing - raise the window, queue the parts the page
+    // supplied, then open - so keep it in one place instead of two copies that drift.
+    auto openSiteRequest = [&bridge](const QString& url, int quality,
+                                     const QList<ui::QmlPlayerBridge::WebPart>& webParts) {
         bridge.bringToFront();
-        // A multi-part video arrives with the page's own part titles; queue those
-        // before the open so the list shows what the site shows.
-        if (!parts.isEmpty()) {
-            QList<ui::QmlPlayerBridge::WebPart> webParts;
-            webParts.reserve(parts.size());
-            for (const auto& part : parts)
-                webParts.append({part.page, part.title, part.url});
-            bridge.queueWebParts(webParts, url);
-        }
-        bridge.openNetworkAddress(url, quality);
+        // 先确认解析真的启动了，再排队。若解析器正忙（biliResolveBusy），
+        // openNetworkAddress 会返回 false 并提示用户；此时把分集插进列表只会留下一批
+        // 与当前播放无关的条目，而且 webPartsQueued 会卡在 true。
+        // Confirm the open actually started before queueing: if the resolver is busy,
+        // openNetworkAddress returns false and only shows a notice - queueing anyway left
+        // a block of entries unrelated to what is playing and stuck webPartsQueued true.
+        if (!bridge.openNetworkAddress(url, quality)) return;
+        if (!webParts.isEmpty()) bridge.queueWebParts(webParts, url);
+    };
+
+    ui::PlaybackServer playbackServer([&bridge, &openSiteRequest](const QString& url, int quality,
+                                               const QList<ui::PlaybackServer::Part>& parts){
+        QList<ui::QmlPlayerBridge::WebPart> webParts;
+        webParts.reserve(parts.size());
+        for (const auto& part : parts)
+            webParts.append({part.page, part.title, part.url});
+        openSiteRequest(url, quality, webParts);
     });
     if (!updateProbe) playbackServer.listen(18765);
     if (!protocolUrl.isEmpty()) {
         veyra::log::info("playback-server", std::format("protocol request: host={} qn={} parts={}",
                                                          QUrl(protocolUrl).host().toStdString(), protocolQuality,
                                                          protocolParts.size()));
-        QTimer::singleShot(1500, &bridge, [&bridge, url = protocolUrl, quality = protocolQuality,
-                                           parts = protocolParts] {
-            bridge.bringToFront();
-            // Same order as the HTTP route: queue the parts first so the entry that is
-            // about to play is already in the list and can be highlighted.
-            if (!parts.isEmpty()) bridge.queueWebParts(parts, url);
-            bridge.openNetworkAddress(url, quality);
+        QTimer::singleShot(1500, &bridge, [&openSiteRequest, url = protocolUrl,
+                                           quality = protocolQuality, parts = protocolParts] {
+            openSiteRequest(url, quality, parts);
         });
     }
 

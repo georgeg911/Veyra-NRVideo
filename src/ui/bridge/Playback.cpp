@@ -263,7 +263,18 @@ void QmlPlayerBridge::openPath(const QString& path) {
     if (path.startsWith(QLatin1String("http://"), Qt::CaseInsensitive) ||
         path.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)) {
         if (media::isBilibiliPageUrl(path.toStdWString())) {
-            openNetworkAddress(path, 0);
+            // 先做一次状态清理再去解析。解析要 1-2 秒，这期间用户可能还停在屏幕裁剪
+            // 编辑态或独占移动态；原来直接 return，这些状态要等到真正 openPath(CDN)
+            // 才被清掉，而且源标签/画质也会短暂不一致。
+            // Clear per-open UI state before handing off to the resolver: resolution takes
+            // a second or two, and returning straight away left crop-edit / exclusion-move
+            // states (and the source label) stale until the resolved open ran.
+            impl_->screenCropPreview = false;
+            endExclusionMove(false);
+            impl_->exclusionSelected = -1;
+            ++impl_->liveOpenGen;
+            impl_->pendingLiveText.clear();
+            openNetworkAddress(path, impl_->pendingBiliQuality);
             return;
         }
     }
@@ -350,14 +361,17 @@ void QmlPlayerBridge::openPath(const QString& path) {
     options.network.corrupt=media::corruptPolicyFromId(impl_->prefString("networkCorrupt").toStdString());
     impl_->engine.open(impl_->videoWindow, wide, options);
     impl_->openingSessionId = impl_->engine.snapshot().sessionId;
-    // Network sources were excluded from playlist state tracking because a network URL
-    // may be a live stream, and a live stream has no meaningful "playing this row"
-    // state. A site page (a Bilibili video, now also a playlist entry per part) is a
-    // network address too, and it does need the state: tickPlaylist() drives both the
-    // "正在播放" badge and the row highlight, so without this the list never showed
-    // which part was on. Exclude only the URLs that are really live.
-    const bool liveSource = network && !media::isBilibiliPageUrl(wide);
-    impl_->playlistSession = liveSource ? 0 : impl_->openingSessionId;
+    // 播放列表状态跟踪：站点页面（B 站视频，现在每个分集都是列表条目）需要它，
+    // tickPlaylist() 靠它驱动「正在播放」和行高亮。这里拿到的是解析后的 CDN 地址
+    // （页面地址在上面已经被转到 openNetworkAddress 了），所以「是不是站点页面」在这里
+    // 判不出来；tickBilibiliResolve() 在 openPath 之后会把 playlistPath/sourceLabel
+    // 指回页面并重新绑定会话，那才是让高亮生效的地方。
+    // Playlist state tracking: a site page needs it (tickPlaylist drives the badge and the
+    // row highlight). What reaches here is the resolved CDN address - the page URL was
+    // already handed to openNetworkAddress above - so "is this a site page" cannot be
+    // decided here; tickBilibiliResolve() re-points playlistPath/sourceLabel at the page
+    // after openPath and rebinds the session, which is what actually makes it work.
+    impl_->playlistSession = network ? 0 : impl_->openingSessionId;
     impl_->resumeSession = 0;
     if ((impl_->prefBool("rememberPosition", true)||impl_->prefBool("autoResume",false))) {
         const auto saved = impl_->prefs.value("positions").toMap().value(path).toMap();
@@ -394,6 +408,14 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         // lastSource rather than the CDN address, whose signature expires.
         impl_->pendingBiliPage = trimmed;
         impl_->pendingBiliQuality = quality;
+        // 每次打开都从「还没排过分集」开始。原来这面旗在解析成功路径的末尾复位，
+        // 于是解析失败（网络错、需要登录、BV 不存在）或用户中途换片源时它残留 true，
+        // 下一次真正成功的解析会跳过 API 兜底排队。作废点与赋值点放在一起才安全。
+        // Start every open from "parts not queued yet". This used to be reset at the end
+        // of the success path only, so a failed resolve (network error, login required,
+        // bad BV) or an interrupted open left it true and the next successful resolve
+        // skipped its API fallback. Reset where it is armed, not where it succeeds.
+        impl_->webPartsQueued = false;
         // zh / en / both; the extras fall back to the other language when a video
         // only carries one of them.
         const QString langPref = impl_->prefString("biliSubtitleLang");
@@ -405,27 +427,43 @@ bool QmlPlayerBridge::openNetworkAddress(const QString& address, int quality){
         // resolves the page also fetches the comment track and the CC subtitles for
         // the part it resolved, so the player never shows a video first and then
         // starts a second round-trip for its overlays.
-        impl_->biliResolve = std::async(std::launch::async,
-            [page, cookie, quality, wantDanmaku, wantSubtitles, subtitleMode] {
-            BilibiliBundle bundle;
-            try { bundle.stream = media::resolveBilibiliStream(page, cookie, quality); }
-            catch (...) { bundle.stream.error = L"Bilibili resolution failed"; return bundle; }
-            if (!bundle.stream.ok) return bundle;
-            bundle.wantDanmaku = wantDanmaku;
-            bundle.wantSubtitles = wantSubtitles;
-            std::wstring error;
-            if (wantDanmaku && !media::fetchBiliDanmaku(bundle.stream.cid, bundle.danmaku, error))
-                bundle.extrasError = L"弹幕：" + error;
-            error.clear();
-            if (wantSubtitles &&
-                !media::fetchBiliSubtitle(bundle.stream.aid, bundle.stream.cid, cookie,
-                                          subtitleMode,
-                                          bundle.cues, bundle.subtitleStyle,
-                                          bundle.subtitleLanguage, error))
-                bundle.extrasError += std::wstring(bundle.extrasError.empty() ? L"" : L"；") +
-                                      L"字幕：" + error;
-            return bundle;
-        });
+        // std::async 可能抛 std::system_error（线程创建失败）。不接住的话异常会一路
+        // 冒到 Qt 事件循环里变成 terminate，而且 biliResolveBusy 已经置 true、又没有
+        // future，本进程内再也解析不了任何 B 站链接。异常时把整组状态一起回滚。
+        // std::async can throw std::system_error when the thread cannot be created. Left
+        // uncaught it reaches Qt's event loop and terminates, and biliResolveBusy is
+        // already true with no future attached - no Bilibili link would ever resolve again
+        // in this process. Roll the whole set of flags back on failure.
+        try {
+            impl_->biliResolve = std::async(std::launch::async,
+                [page, cookie, quality, wantDanmaku, wantSubtitles, subtitleMode] {
+                BilibiliBundle bundle;
+                try { bundle.stream = media::resolveBilibiliStream(page, cookie, quality); }
+                catch (...) { bundle.stream.error = L"Bilibili resolution failed"; return bundle; }
+                if (!bundle.stream.ok) return bundle;
+                bundle.wantDanmaku = wantDanmaku;
+                bundle.wantSubtitles = wantSubtitles;
+                std::wstring error;
+                if (wantDanmaku && !media::fetchBiliDanmaku(bundle.stream.cid, bundle.danmaku, error))
+                    bundle.extrasError = L"弹幕：" + error;
+                error.clear();
+                if (wantSubtitles &&
+                    !media::fetchBiliSubtitle(bundle.stream.aid, bundle.stream.cid, cookie,
+                                              subtitleMode,
+                                              bundle.cues, bundle.subtitleStyle,
+                                              bundle.subtitleLanguage, error))
+                    bundle.extrasError += std::wstring(bundle.extrasError.empty() ? L"" : L"；") +
+                                          L"字幕：" + error;
+                return bundle;
+            });
+        } catch (const std::exception& e) {
+            veyra::log::error("bilibili", std::format("could not start the resolve thread: {}", e.what()));
+            impl_->biliResolveBusy = false;
+            impl_->pendingBiliPage.clear();
+            impl_->pendingBiliQuality = 0;
+            emit notice(tr("无法启动解析线程，请稍后重试"), true);
+            return false;
+        }
         emit notice(tr("正在解析 B 站链接…"), false);
         return true;
     }
@@ -559,7 +597,6 @@ void QmlPlayerBridge::tickBilibiliResolve() {
         for (const auto& part : stream.parts) titles.push_back(part.title);
         queueBilibiliParts(titles, stream.currentPart, impl_->pendingBiliPage);
     }
-    impl_->webPartsQueued = false;   // one order only, per open
 }
 
 void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& currentUrl) {

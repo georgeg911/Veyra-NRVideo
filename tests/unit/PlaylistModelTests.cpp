@@ -95,21 +95,25 @@ int main(int argc, char** argv) {
     const int before = model.count(); model.remove(model.currentIndex());
     check(model.currentIndex() == -1 && model.count() == before - 1 && !model.advanceAfterEnd(), "removing active item does not mislabel its successor");
     // 网络条目（B 站分集）也要能连播：它们没有文件可 stat，playFrom 不能把它们跳过。
+    // 用一个独立的 model，避免污染后面关于顺序/持久化的断言。
     // Network entries (Bilibili episodes) must auto-advance too: there is no file to
-    // stat, and playFrom used to skip every one of them.
+    // stat, and playFrom used to skip every one of them. Uses its own model so the
+    // later order/persistence assertions stay untouched.
     {
+        PlaylistModel webModel(root + "/web-playlist.json");
+        QObject::connect(&webModel, &PlaylistModel::playRequested, [&](const QString& p) { playing = p; });
         const QStringList web{
             QStringLiteral("https://www.bilibili.com/video/BV1aa411c7aa/"),
             QStringLiteral("https://www.bilibili.com/video/BV1bb411c7bb/")};
-        model.addPathsWithNames(web, {});
-        check(wait([&] { return !model.busy(); }), "web entries settle");
-        const int first = model.indexOfPath(web.at(0));
-        const int second = model.indexOfPath(web.at(1));
-        check(first >= 0 && second == first + 1, "web entries keep the order they were given in");
-        model.setAutoAdvance(true);
-        model.setPlayback(web.at(0), "ended");
+        webModel.addPathsWithNames(web, {});
+        check(wait([&] { return !webModel.busy(); }) && webModel.count() == 2, "web entries enter the list");
+        const int first = webModel.indexOfPath(web.at(0));
+        const int second = webModel.indexOfPath(web.at(1));
+        check(first == 0 && second == 1, "web entries keep the order they were given in");
+        webModel.setAutoAdvance(true);
+        webModel.setPlayback(webModel.pathAt(0), "ended");
         playing.clear();
-        check(model.next() && playing == web.at(1), "auto advance crosses web entries");
+        check(webModel.advanceAfterEnd() && playing == web.at(1), "auto advance crosses web entries");
     }
     model.setAutoAdvance(false);
     check(model.save(), "atomic JSON save");

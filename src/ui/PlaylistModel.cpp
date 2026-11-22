@@ -68,27 +68,52 @@ QString PlaylistModel::normalizedPath(const QString& path) {
     if (isNetworkPath(path)) return path;   // addresses are stored verbatim
     return QDir::cleanPath(QFileInfo(QDir::fromNativeSeparators(path)).absoluteFilePath());
 }
+namespace {
+// B 站视频页的识别。只有这类地址才做「视频 + 分P」归一化：别的网络地址（直链、rtsp、
+// udp）的 query/端口/协议都是有意义的，把它们也压成 host+path 会让两个不同的流共用
+// 一个键，去重时静默丢掉后加的那条。
+// Identifies a Bilibili video page. Only these get the "video + part" normalisation:
+// for any other network address the query, port and scheme are meaningful, and
+// collapsing them to host+path would make two different streams share one key and be
+// silently dropped as duplicates.
+bool isSiteVideoPage(const QUrl& url) {
+    if (!url.isValid()) return false;
+    const auto host = url.host().toLower();
+    if (host != QLatin1String("bilibili.com") && !host.endsWith(QLatin1String(".bilibili.com")) &&
+        host != QLatin1String("b23.tv"))
+        return false;
+    return url.path().contains(QLatin1String("/video/"));
+}
+// 去掉尾斜杠：B 站同一页有 /video/BVxxx 和 /video/BVxxx/ 两种写法。
+// Strip trailing slashes: Bilibili serves one page under both spellings.
+QString trimmedPath(const QUrl& url) {
+    QString p = url.path();
+    while (p.endsWith(QLatin1Char('/'))) p.chop(1);
+    return p;
+}
+// 分P 号；没有 p 参数按第 1 分P（B 站第一集的地址通常不带 p）。
+// The part number; an absent p means part 1 (Bilibili omits it for the first episode).
+QString partOf(const QUrl& url) {
+    const auto value = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
+    return value.isEmpty() ? QStringLiteral("1") : value;
+}
+} // namespace
+
 QString PlaylistModel::keyOf(const QString& path) {
     auto value = normalizedPath(path);
-    // A site page is identified by the video and the part, not by the exact string: the
-    // browser appends tracking parameters (vd_source, spm_id_from, trackid) and they are
-    // not stable, so the same episode could be added twice as two different rows. A page
-    // with no p at all is part 1 (the Bilibili URL for the first part usually omits it).
     if (isNetworkPath(value)) {
         const QUrl url(value, QUrl::StrictMode);
-        if (url.isValid() && !url.host().isEmpty()) {
-            auto part = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
-            if (part.isEmpty()) part = QStringLiteral("1");
-            // Bilibili uses both "/video/BVxxxx" and "/video/BVxxxx/" for one page, so
-            // the trailing slash cannot be part of the identity either.
-            QString pagePath = url.path();
-            while (pagePath.endsWith(QLatin1Char('/'))) pagePath.chop(1);
-            auto key = url.host().toLower() + pagePath + QLatin1Char('#') + part;
-#ifdef Q_OS_WIN
-            key = key.toCaseFolded();
-#endif
-            return key;
+        if (isSiteVideoPage(url)) {
+            // host 统一小写；path 与分P 保持原样——BV 号区分大小写，折叠会把两个不同
+            // 视频并成一条。尾斜杠与会变的跟踪参数不参与身份。
+            // Lower-case the host only. The path and the part keep their case: a BV id is
+            // case-sensitive, and folding it merged two different videos into one key.
+            // The trailing slash and the volatile tracking parameters are not identity.
+            return url.host().toLower() + trimmedPath(url) + QLatin1Char('#') + partOf(url);
         }
+        // 其它网络地址按原样（规范化 scheme/host 大小写即可）。
+        // Other network addresses keep their full form.
+        return value;
     }
 #ifdef Q_OS_WIN
     value = value.toCaseFolded();
@@ -249,12 +274,24 @@ PlaylistModel::Result PlaylistModel::scan(const Job& job, std::stop_token stop) 
             if (int(result.entries.size()) >= maxEntries) { result.limited = true; break; }
         }
     }
-    // A site page's list has its own meaningful order (P1, P2, ... / episode order) and
-    // the caller sends it in that order; re-sorting by name scrambles it ("二" before
-    // "一"). Files keep the existing name sort, which is what makes a folder readable.
-    const bool hasSitePages = std::any_of(result.entries.begin(), result.entries.end(),
-        [this](const Entry& e) { return isNetworkPath(e.path); });
-    if (!cancelled() && !hasSitePages) order(result.entries, NameAscending);
+    // 站点页面有自己唯一正确的顺序（P1、P2… / 合集的分集顺序），调用方就是按那个
+    // 顺序发来的；按名字重排会把它打乱（「第二集」排在「第一集」前面）。所以只对本地
+    // 文件排序，站点条目原样保留——混在一批里时两部分各自有序。
+    // A site page has exactly one correct order (P1, P2 ... / the collection's episode
+    // order) and the caller sends it that way; a name sort scrambles it ("第二集" sorts
+    // before "第一集"). Sort the local files only and leave site entries in place.
+    if (!cancelled()) {
+        std::vector<Entry> files, pages;
+        for (auto& e : result.entries) (isNetworkPath(e.path) ? pages : files).push_back(std::move(e));
+        // 注意：上面把元素都 move 走了，所以必须无条件把两者拼回去，任何一条分支漏掉
+        // 都会让 result.entries 变成空壳（曾经只有站点页面时整批条目被丢掉）。
+        // The loop above moved every element out, so they must always be written back;
+        // a branch that forgets leaves result.entries empty (an all-site batch was lost).
+        order(files, NameAscending);   // 站点条目本来就是正确顺序，只排文件
+        files.insert(files.end(), std::make_move_iterator(pages.begin()),
+                     std::make_move_iterator(pages.end()));
+        result.entries = std::move(files);
+    }
     return result;
 }
 void PlaylistModel::workerLoop(std::stop_token stop) {
@@ -285,7 +322,15 @@ void PlaylistModel::accept(Result result, uint64_t generation) {
         beginInsertRows({}, count(), count() + int(added.size()) - 1);
         for (auto& entry : added) entries_.push_back(std::move(entry));
         endInsertRows(); emit countChanged(); emit currentChanged();
-        if (sort_ != Manual) sortBy(sort_);
+        // 用户在名称/大小排序下添加文件时保持排序，但站点条目必须按发布顺序留着：
+        // 整表重排会把 P1/P2… 和合集分集顺序打乱，auto-advance 的「下一集」也就错了。
+        // Keep the user's sort for files, but never re-sort site entries: a full re-sort
+        // scrambles P1/P2... and the collection order, which also breaks "next episode".
+        if (sort_ != Manual) {
+            const bool anySite = std::any_of(entries_.begin(), entries_.end(),
+                [this](const Entry& e) { return isNetworkPath(e.path); });
+            if (!anySite) sortBy(sort_);
+        }
         saveTimer_.start();
     }
     if (!busy()) emit busyChanged();
@@ -301,31 +346,18 @@ int PlaylistModel::indexOfPath(const QString& path) const {
     return -1;
 }
 int PlaylistModel::indexOfSitePage(const QString& path) const {
-    // A site page can be written several ways: the browser may append tracking
-    // parameters (spm_id_from, vd_source, trackid), the order of query items is not
-    // stable, and Bilibili itself uses both "/video/BVxxxx" and "/video/BVxxxx/" for the
-    // same page. Compare what identifies the video instead: host + path (trailing slash
-    // ignored) + the part. A page with no p at all is part 1, because the URL for the
-    // first part usually omits it while the queued entry says p=1.
+    // 直接复用 keyOf 的归一化：它已经按 host + 去尾斜杠的 path + 分P 生成键，忽略
+    // 跟踪参数、参数顺序和 BV 号大小写之外的差异。三处各写一套比较是这个文件里
+    // 反复出错的来源（曾经 keyOf 认为相同、indexOfSitePage 认为不同）。
+    // Reuse keyOf's normalisation instead of a second comparison: it already keys on
+    // host + slash-trimmed path + part, ignoring tracking parameters and parameter
+    // order. Three separate implementations of "same page" is what kept breaking here -
+    // keyOf would call two addresses equal while indexOfSitePage called them different.
     const QUrl wanted(path, QUrl::StrictMode);
-    if (!wanted.isValid() || wanted.host().isEmpty()) return -1;
-    const auto pathOf = [](const QUrl& url) {
-        QString p = url.path();
-        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
-        return p;
-    };
-    const auto partOf = [](const QUrl& url) {
-        const auto value = QUrlQuery(url).queryItemValue(QStringLiteral("p")).trimmed();
-        return value.isEmpty() ? QStringLiteral("1") : value;
-    };
-    const auto wantedPart = partOf(wanted);
-    const auto wantedPath = pathOf(wanted);
+    if (!isSiteVideoPage(wanted)) return -1;
+    const auto wantedKey = keyOf(path);
     for (int i = 0; i < count(); ++i) {
-        const QUrl candidate(entries_[i].path, QUrl::StrictMode);
-        if (!candidate.isValid()) continue;
-        if (candidate.host().compare(wanted.host(), Qt::CaseInsensitive) != 0) continue;
-        if (pathOf(candidate) != wantedPath) continue;
-        if (partOf(candidate) == wantedPart) return i;
+        if (entries_[i].key == wantedKey) return i;
     }
     return -1;
 }
@@ -334,31 +366,24 @@ QString PlaylistModel::pathAtRow(int row) const {
     return entries_[row].path;
 }
 void PlaylistModel::retainSiteVideos(const QStringList& keepPaths) {
-    // 按 host + path 识别「同一个视频」，保留集合由调用方给全（合集是多个 BV）。
-    // 本地文件不在处理范围内。尾斜杠不表意：/video/BVxxx 与 /video/BVxxx/ 是同一页。
-    // Identify a video by host + path; the caller supplies the whole keep set (a
-    // collection is many BVs). Local files are left alone. Trailing slash is not
-    // significant - Bilibili uses both spellings for one page.
-    const auto pathOf = [](const QUrl& url) {
-        QString p = url.path();
-        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
-        return p;
-    };
-    QSet<QString> keepKeys;
+    // 按「视频」而不是「分P」保留：合集里同一视频的多集要一起留下，所以键里不带分P。
+    // 本地文件不在处理范围内。
+    // Keep by *video*, not by part: every episode of one video in the keep set has to
+    // survive, so the part is deliberately not part of this key. Local files untouched.
+    QSet<QString> keepVideos;
     for (const auto& path : keepPaths) {
         const QUrl url(path, QUrl::StrictMode);
-        if (!url.isValid() || url.host().isEmpty()) continue;
-        keepKeys.insert(url.host().toLower() + pathOf(url));
+        if (isSiteVideoPage(url)) keepVideos.insert(url.host().toLower() + trimmedPath(url));
     }
-    if (keepKeys.isEmpty()) return;
+    if (keepVideos.isEmpty()) return;
     std::vector<int> doomed;
     for (int i = 0; i < count(); ++i) {
         const auto& entry = entries_[i];
         if (!isNetworkPath(entry.path)) continue;          // local file: keep
         const QUrl candidate(entry.path, QUrl::StrictMode);
-        if (!candidate.isValid()) continue;
-        const auto key = candidate.host().toLower() + pathOf(candidate);
-        if (!keepKeys.contains(key)) doomed.push_back(i);
+        if (!isSiteVideoPage(candidate)) continue;         // not a site page: keep
+        const auto video = candidate.host().toLower() + trimmedPath(candidate);
+        if (!keepVideos.contains(video)) doomed.push_back(i);
     }
     if (doomed.empty()) return;
     // Remove back to front so the earlier indices stay valid.
