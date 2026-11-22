@@ -29,3 +29,9 @@ CMakeUserPresets.json
 startup-music.mp3
 BGM.MP3
 __pycache__/
+
+# 个人定制内容：不推送到公开 fork
+# Personal customization: kept out of the public fork
+/MY_WORK.md
+/HANDOFF.md
+/tools/launcher-scripts/
