@@ -2473,6 +2473,28 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(cachedFrame&&((initialRemoteFramePending||initialFileFramePending)||(transaction&&(!isCapture||paused_)))){frame=cachedFrame;pkt=cachedPacket;initialRemoteFramePending=false;initialFileFramePending=false;}
                 else if(!isImage){
                     auto rs=physicalCapture?captureSource.tryRead(pkt,&frame):activeSource->read(pkt,&frame);
+                    // 容错播放时 source 可能在内部跳过损坏的空洞（自动 seek）。必须在这里、
+                    // 也就是每次 read 之后立刻检查：跳段后 read 返回的是 Frame 而不是 Waiting，
+                    // 放在后面的等待分支里永远抓不到（实测音画差了 200 秒还触发不了）。
+                    // The source may skip a damaged hole by seeking internally during tolerant
+                    // playback. This has to be checked right after every read: a jump returns
+                    // Frame, not Waiting, so a check in the waiting branch never fires (measured
+                    // a 200 s A/V gap that went undetected).
+                    if(!isCapture&&!isImage&&activeSource){
+                        if(const int64_t jumpUs=activeSource->consumePositionJumpUs();jumpUs>=0){
+                            veyra::log::warn("source-file",std::format(
+                                "source jumped internally to {:.1f} s; moving the audio there too",jumpUs/1e6));
+                            if(audioStarted)(void)audioPipe.requestSeek(double(jumpUs)/1000.0);
+                            lastAudioClockMs=double(jumpUs)/1000.0;
+                            audioClockExhausted=false;
+                            audioRebuffering=false;
+                            anchorMs=double(jumpUs)/1000.0;
+                            anchor=Clock::now();
+                            reset=true;
+                            pendingResetCause=pipeline::ResetReason::Seek;
+                            seekPreviewPending=true;
+                        }
+                    }
                     // Keep the accepted transaction and rollback state alive until
                     // the next real capture sample arrives. Never bind old PTS to now.
                     while(transaction&&isCapture&&rs==source::SourceReadStatus::Waiting&&!stop_){
@@ -2480,6 +2502,27 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         advanceLive();publishWaitingProgress();waitLive();rs=physicalCapture?captureSource.tryRead(pkt,&frame):activeSource->read(pkt,&frame);
                     }
                     if(stop_)break;
+                    // 容错播放时 source 可能在内部跳过损坏的空洞（自动 seek）。画面已经到
+                    // 了新位置而音频还停在旧的，实测差 200 秒后播放器自己暂停；这里把音频
+                    // 一起挪过去，音画才不会脱节。
+                    // Tolerant playback may skip a damaged hole by seeking inside the source.
+                    // The picture is then ahead of the audio - measured a 200 s gap, after
+                    // which the player paused itself. Move the audio along so they stay in step.
+                    if(!isCapture&&!isImage&&activeSource){
+                        if(const int64_t jumpUs=activeSource->consumePositionJumpUs();jumpUs>=0){
+                            veyra::log::warn("source-file",std::format(
+                                "source jumped internally to {:.1f} s; moving the audio there too",jumpUs/1e6));
+                            if(audioStarted)(void)audioPipe.requestSeek(double(jumpUs)/1000.0);
+                            lastAudioClockMs=double(jumpUs)/1000.0;
+                            audioClockExhausted=false;
+                            audioRebuffering=false;
+                            anchorMs=double(jumpUs)/1000.0;
+                            anchor=Clock::now();
+                            reset=true;
+                            pendingResetCause=pipeline::ResetReason::Seek;
+                            seekPreviewPending=true;
+                        }
+                    }
                     if(rs==source::SourceReadStatus::Waiting){if(isScreen){std::lock_guard lock(mutex_);snapshot_.sourceNotice=screenSource.status();}advanceLive();publishWaitingProgress();waitLive();continue;}
                     if(rs==source::SourceReadStatus::Eos){
                         fileInputEnded=true;

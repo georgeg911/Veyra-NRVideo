@@ -993,6 +993,7 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
     // Damaged data is tolerated on the player's network sources and MPEG-TS; export
     // and every offline user keep the strict stop. Local files join them when the user
     // asked for damaged-file tolerance, or when the lenient retry is what got us open.
+    localNetworkSource_ = media::networkMediaInput(desc.path);
     tolerant_ = desc.tolerateCorruption &&
                 (media::networkMediaInput(desc.path) ||
                  demuxer_.formatName().find("mpegts") != std::string::npos ||
@@ -1405,7 +1406,17 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
         // caller cannot see "we are stuck in a hole". Watch the counter here instead: too many
         // drops in a row means jump past the whole stretch, because one hole in a sparse file
         // holds tens of thousands of bad packets and dropping them one by one never gets out.
-        if (tolerant_) {
+        // 跳段只对「本地文件」开放，不碰网络源。
+        // 网络源（B 站等）的丢包由已有的缓冲/重连机制处理：那里丢包往往是 CDN 抖动，
+        // 重连能真正接上；而在这里凭空往前跳 30 秒，用户看到的是画面莫名跳跃。
+        // 本地文件不同——稀疏文件的空洞是静态的、不会自己好，只能绕过去。
+        // Hole-skipping is for local files only, never for network sources.
+        // A network source's loss is handled by the existing buffering/reconnect path: there
+        // the loss is usually a CDN wobble that a reconnect genuinely fixes, while jumping
+        // 30 s ahead here just looks like the picture teleporting. A local file is different -
+        // a sparse file's holes are static and will not heal, so the only option is to step
+        // over them.
+        if (tolerant_ && !localNetworkSource_) {
             const uint64_t dropped = decoder_.stats().badPacketsDropped;
             if (dropped != lastDroppedPackets_) {
                 const uint64_t delta = dropped - lastDroppedPackets_;
@@ -1432,6 +1443,9 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
                             droppedInWindow_, kSkipStepUs_ / 1e6, nextUs / 1e6, damageJumpCount_, kMaxDamageJumps));
                         droppedInWindow_ = 0;
                         dropWindowStart_ = {};
+                        // 告诉引擎我们内部跳到了哪里，它据此把音频一起挪过去。
+                        // Tell the engine where we jumped internally so it moves the audio too.
+                        pendingPositionJumpUs_ = nextUs;
                         startKeyframeWait();
                         resumeAfterUs_ = INT64_MIN;
                         lastPtsUs_ = INT64_MIN;
@@ -2035,6 +2049,13 @@ bool MediaFileSource::tolerateDecoderError()
     }
     startKeyframeWait();
     return true;
+}
+
+int64_t MediaFileSource::consumePositionJumpUs()
+{
+    const int64_t value = pendingPositionJumpUs_;
+    pendingPositionJumpUs_ = -1;
+    return value;
 }
 
 // Damaged data reached the decoder: drop what it holds and feed it again from the next clean keyframe.

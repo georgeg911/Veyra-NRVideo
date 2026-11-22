@@ -45,6 +45,7 @@ public:
     SourceReadStatus read(pipeline::FramePacket& out, const AVFrame** decodedFrame) override;
     bool seek(const pipeline::Rational& targetSeconds) override;
     void close() noexcept override;
+    int64_t consumePositionJumpUs() override;
 
     uint64_t framesRead() const { return framesRead_; }
     uint64_t seekCount() const { return seekCount_; }
@@ -166,6 +167,14 @@ private:
     // Damaged-file tolerance: jump past a whole bad stretch instead of dropping packets one by
     // one. Both the step and the attempt count are bounded.
     int damageJumpCount_=0;
+    // 内部跳段后记下新位置，引擎取走它以便同步音频（取过即清零）。
+    // After an internal jump, remember where we landed so the engine can sync the audio
+    // (reading clears it).
+    int64_t pendingPositionJumpUs_=-1;
+    // 这条源是不是网络地址（http/https/rtsp...）。跳段逻辑要据此排除网络源。
+    // Whether this source is a network address (http/https/rtsp...). Hole-skipping has to
+    // exclude network sources.
+    bool localNetworkSource_=false;
     // 解码器静默丢包时，靠这两个量判断「是不是正卡在空洞里」。
     // When the decoder silently drops packets these two tell us "we are stuck in a hole".
     uint64_t lastDroppedPackets_=0;
