@@ -633,7 +633,11 @@ Window {
     }
     Connections {
         target: veyra
-        function onMediaOpenRequested() { screenCrop.editing = false }
+        // 关闭屏幕裁剪编辑态。必须延后一帧：mediaOpenRequested 是在 openPath() 里
+        // 同步发出的，此刻原生视频窗口正在重建，直接赋值 editing 会让五处绑定
+        // （maskInput / 控件条 / 快捷键 / 鼠标区）在同一帧重算，Qt 6 在那种状态下
+        // 重建 item 树会解引用空指针（0xC0000005 @ Qt6Qml.dll）。
+        function onMediaOpenRequested() { Qt.callLater(function() { screenCrop.editing = false }) }
     }
     MouseArea {
         id: maskInput
