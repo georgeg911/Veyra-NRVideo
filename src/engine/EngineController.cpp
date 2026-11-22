@@ -1754,6 +1754,25 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 snapshot_.audioAvailable=true;
                             }
                             if(std::isfinite(resumeMs)&&resumeMs>0.0)(void)audioPipe.requestSeek(resumeMs);
+                            // 重连之后走一次「完整 seek」，和用户手动点进度条完全同一条路径。
+                            // 只 seek 音频是不够的：现场 2026-11-22 02:29 声音回来了
+                            // （pcmMs=986 queuedMs=2508、holding=false），画面却卡住、
+                            // 10 秒只出 82 帧、engine-hang 8 秒，用户点一下进度条立刻就恢复。
+                            // 这里直接把 seekSeconds_ 设成当前媒体时刻，让主循环按正常 seek
+                            // 流程重建视频侧状态（重置管线、重算锚点、音画一起对齐）。
+                            // Run a full seek after the reconnect - exactly the path a user takes
+                            // by clicking the progress bar. Seeking only the audio is not enough:
+                            // field log 2026-11-22 02:29 had healthy audio (pcmMs=986
+                            // queuedMs=2508, holding=false) while the picture froze for 8 s and
+                            // produced 82 frames in ten seconds; one click on the bar fixed it.
+                            // Setting seekSeconds_ makes the main loop rebuild the video side
+                            // through the normal seek path (reset, re-anchor, re-align).
+                            if(std::isfinite(resumeMs)&&resumeMs>0.0&&seekSeconds_.load()<0){
+                                std::lock_guard lock(mutex_);
+                                snapshot_.seekTarget=resumeMs/1000.0;
+                                ++snapshot_.seekRequested;
+                                seekSeconds_=resumeMs/1000.0;
+                            }
                             audioGateWasHolding=false;
                             watchdog_->beat();
                             veyra::log::info("buffering-gate",std::format(
@@ -1789,6 +1808,17 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                         snapshot_.audioAvailable=true;
                                     }
                                     if(std::isfinite(resumeMs)&&resumeMs>0.0)(void)audioPipe.requestSeek(resumeMs);
+                                    // 同上：换镜像恢复后视频时钟基准也要跟着挪，否则画面
+                                    // 会为了等新音轨而卡死。
+                                    // 同上：换镜像恢复之后也走一次完整 seek，让视频侧跟着重建。
+                                    // Same as above: a full seek after switching mirrors so the
+                                    // video side rebuilds with it.
+                                    if(std::isfinite(resumeMs)&&resumeMs>0.0&&seekSeconds_.load()<0){
+                                        std::lock_guard lock(mutex_);
+                                        snapshot_.seekTarget=resumeMs/1000.0;
+                                        ++snapshot_.seekRequested;
+                                        seekSeconds_=resumeMs/1000.0;
+                                    }
                                     audioGateWasHolding=false;
                                     recoveredByMirror=true;
                                     veyra::log::info("buffering-gate",std::format(
