@@ -809,7 +809,17 @@ if(screenFill&&currentFile.starts_with(L"screen:")&&s.running){
     static std::wstring lastSubtitleLog;
     if(!draw.empty()){
         std::wstring joined;
-        for(const auto& line:draw){if(!joined.empty())joined+=L" | ";joined+=line.text;}
+        for(const auto& line:draw){
+            if(!joined.empty())joined+=L" | ";
+            joined+=line.text;
+        }
+        // 诊断：把换行显示成 \n 字面量，否则日志里看起来永远是单行。
+        // Diagnostics: render newlines as literal \n, or the log always looks single-line.
+        {
+            std::wstring shown=joined;
+            for(size_t k=0;k<shown.size();++k) if(shown[k]==L'\n') shown.replace(k,1,L"\\n"),++k;
+            veyra::log::info("subtitle-diag",std::format("len={} text={}",joined.size(),narrow(shown)));
+        }
         if(joined!=lastSubtitleLog){lastSubtitleLog=joined;veyra::log::info("subtitle-overlay",std::format("text={}",narrow(joined)));}
     }else if(!lastSubtitleLog.empty())lastSubtitleLog.clear();
     if(!subtitleStatus.empty()){

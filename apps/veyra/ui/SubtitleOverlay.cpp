@@ -140,6 +140,17 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
                 continue;
             }
             if(line.text.empty())continue;
+            // 双语字幕（一个 cue 里 '\n' 分隔的两行）按语言给出不同字号：
+            // 第一行是中文（同时也是主语言），放大一点；第二行是英文译文，缩小一点。
+            // 两行同字号时英文看起来比中文「重」，因为它更宽、占的横向面积更大，
+            // 视觉上会抢掉中文那一行。
+            // Bilingual cues (two lines joined by '\n' in one cue) get different sizes per
+            // language: the first line is Chinese (also the primary language) and is enlarged,
+            // the second is the English translation and is shrunk. At equal sizes the English
+            // line looks heavier simply because it is wider, and it visually steals attention
+            // from the Chinese one.
+            const size_t newlinePos=line.text.find(L'\n');
+            const bool bilingualCue=newlinePos!=std::wstring::npos&&newlinePos+1<line.text.size();
             Line entry;
             entry.path=std::make_unique<Gdiplus::GraphicsPath>();
             entry.style=line.style;
@@ -151,34 +162,69 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
             FontFamily* use=requested.IsAvailable()?&requested:&fallbackFamily;
             if(!requested.IsAvailable())entry.style.font=L"Microsoft YaHei UI";
             StringFormat format;
-            format.SetAlignment(StringAlignmentNear);
+            // 多行 cue（双语字幕就是一个 cue 里用 '\n' 拼中文和英文两行）的每一行
+            // 都按这个 format 的水平对齐绘制。写死 Near 会让两行都靠左，即使整体
+            // 位置是居中的——看上去就是「中文一行偏左、英文一行也偏左」，两行左边缘
+            // 对齐但整块不在屏幕中间。改用该行实际的对齐方式，两行就各自居中。
+            // A multi-line cue (bilingual subtitles are Chinese and English joined with
+            // '\n' in one cue) draws every line using this format's horizontal alignment.
+            // Hard-coding Near left-aligned both lines even when the block itself was
+            // centred: the two lines lined up on their left edges but the block sat off
+            // centre. Use the line's actual alignment so each line is centred on its own.
+            format.SetAlignment(horizontalOf(entry.style.alignment));
             format.SetLineAlignment(StringAlignmentNear);
             format.SetFormatFlags(StringFormatFlagsNoClip|StringFormatFlagsMeasureTrailingSpaces);
-            const auto& text=line.text;
+            // 双语 cue 拆成两条独立的 entry 分别排版：中文那行按原字号（稍放大），
+            // 英文那行缩小一些。这样两行各有自己的 GraphicsPath，堆叠逻辑会把它们
+            // 当作两个块上下排列，而同一个 path 里的两行只能共用一个字号。
+            // A bilingual cue is laid out as two separate entries: the Chinese line at the
+            // user's size (slightly enlarged), the English one smaller. Each gets its own
+            // GraphicsPath so the stacking logic places them as two blocks; lines inside one
+            // path can only share a single font size.
             const bool positioned=line.posX>=0&&line.posY>=0;
-            const float availableWidth=positioned?layoutWidth:std::max(1.0f,layoutWidth-float(dip(h,std::max(0.0,line.style.marginL)+std::max(0.0,line.style.marginR))));
-            float fontPixels=float(dip(h,logicalSize));
-            // Measure the complete cue without a height cap. A two-screen
-            // rectangle can silently omit the end of a long cue before fitting.
-            auto measure=[&](float size){Font font(use,size,toFontStyle(line.style.bold,line.style.italic),UnitPixel);RectF bounds;
-                graphics.MeasureString(text.c_str(),int(text.size()),&font,RectF(0,0,availableWidth,1e7f),&format,&bounds);return bounds;};
-            if(!positioned&&view.fitToLines&&view.targetLines>0){
-                const float minimum=float(dip(h,12));
-                for(int attempt=0;attempt<24&&fontPixels>minimum;++attempt){
-                    Font font(use,fontPixels,toFontStyle(line.style.bold,line.style.italic),UnitPixel);
-                    if(measure(fontPixels).Height<=font.GetHeight(&graphics)*view.targetLines+1)break;
-                    fontPixels=std::max(minimum,fontPixels*.9f);
+            std::wstring primaryText=line.text;
+            std::wstring secondaryText;
+            if(bilingualCue){
+                primaryText=line.text.substr(0,newlinePos);
+                secondaryText=line.text.substr(newlinePos+1);
+            }
+            auto layOne=[&](std::wstring text,double sizeScale,Line& target,const std::wstring& textOverride){
+                target.path=std::make_unique<Gdiplus::GraphicsPath>();
+                target.style=entry.style;
+                const auto& renderText=textOverride;
+                const float availableWidth=positioned?layoutWidth:std::max(1.0f,layoutWidth-float(dip(h,std::max(0.0,target.style.marginL)+std::max(0.0,target.style.marginR))));
+                float fontPixels=float(dip(h,logicalSize*sizeScale));
+                auto measureOne=[&](float size){Font font(use,size,toFontStyle(target.style.bold,target.style.italic),UnitPixel);RectF bounds;
+                    graphics.MeasureString(renderText.c_str(),int(renderText.size()),&font,RectF(0,0,availableWidth,1e7f),&format,&bounds);return bounds;};
+                // 宽度约束：长行不能横向冲出画面（英文往往比中文宽得多）。
+                // Width constraint: a long line must not run off the side (English is usually
+                // much wider than Chinese).
+                const float minimum=float(dip(h,10));
+                for(int attempt=0;attempt<16&&fontPixels>minimum;++attempt){
+                    if(measureOne(fontPixels).Width<=availableWidth+1)break;
+                    fontPixels=std::max(minimum,fontPixels*.92f);
                 }
+                const auto measured=measureOne(fontPixels);
+                target.path->AddString(renderText.c_str(),int(renderText.size()),use,toFontStyle(target.style.bold,target.style.italic),fontPixels,RectF(0,0,availableWidth,std::max(measured.Height+fontPixels*2,1.0f)),&format);
+                target.path->GetBounds(&target.bounds);
+                if(positioned){
+                    target.positioned=true;
+                    target.positionX=float(line.posX)*float(width);
+                    target.positionY=float(line.posY)*float(height);
+                }
+            };
+            if(bilingualCue){
+                // 中文行放大 8%，英文行缩到 78%：英文更宽，同字号时视觉上会压过中文。
+                // Chinese up 8%, English down to 78%: English is wider and at the same size it
+                // visually overpowers the Chinese line.
+                Line zh;layOne(primaryText,1.08,zh,primaryText);
+                Line en;layOne(secondaryText,0.78,en,secondaryText);
+                laid.push_back(std::move(zh));
+                laid.push_back(std::move(en));
+            }else{
+                Line only;layOne(primaryText,1.0,only,primaryText);
+                laid.push_back(std::move(only));
             }
-            const auto measured=measure(fontPixels);
-            entry.path->AddString(text.c_str(),int(text.size()),use,toFontStyle(line.style.bold,line.style.italic),fontPixels,RectF(0,0,availableWidth,std::max(measured.Height+fontPixels*2,1.0f)),&format);
-            entry.path->GetBounds(&entry.bounds);
-            if(line.posX>=0&&line.posY>=0){
-                entry.positioned=true;
-                entry.positionX=float(line.posX)*float(width);
-                entry.positionY=float(line.posY)*float(height);
-            }
-            laid.push_back(std::move(entry));
         }
         // The caller passes secondary lines first, primary last: the loop below
         // lays them out bottom-up, so the primary cue ends up on the bottom.

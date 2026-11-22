@@ -405,6 +405,16 @@ bool fetchBiliSubtitle(long long aid, long long cid, const std::wstring& cookie,
                 if (nl != std::wstring::npos) cue.content.resize(nl);
                 cue.content += L'\n' + englishCues[j].content;
             }
+            // 诊断：报告英文轨实际拿到多少条、首条内容有多长。合并逻辑看起来对，但如果
+            // 英文轨是空的（CDN 返回空文件、或语言选错成没有英文的那条），结果就是
+            // 中文后面跟一个空行——日志里只看得见中文，误以为合并没生效。
+            // Diagnostics: report how many English cues arrived and how long the first one is.
+            // The merge itself looks right, but an empty English track (blank file from the CDN,
+            // or the wrong track picked) yields "Chinese + empty line" - the log then shows only
+            // Chinese and it looks as if the merge did not happen.
+            size_t firstLen = englishCues.empty() ? 0 : englishCues.front().content.size();
+            log::info("bilibili", std::format("bilingual merge: zh={} en={} firstEnLen={}",
+                cues.size(), englishCues.size(), firstLen));
             merged = true;
             language = L"both";
         }
