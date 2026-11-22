@@ -631,13 +631,24 @@ Window {
             dialogs.open("screen")
         }
     }
+    // 打开新片源时关闭屏幕裁剪编辑态。
+    // 不能简单地「任何新源打开就 editing=false」：屏幕裁剪预览走的是
+    //   startScreenCapture() → 内部 openSourceUri() 同步发出本信号
+    //   → 紧接着 dialogHost.startScreenCrop() 才把 editing 置 true
+    // 直接赋值（无论同步还是 Qt.callLater）都会把刚打开的裁剪框关掉。
+    // 改由 ready 收敛：ready 已包含 hasSource && !openingSource && sourceKind==="screen"，
+    // 打开非 screen 源时它会变 false，此时才退出编辑态；打开 screen 预览时不会自杀。
+    // Close the screen-crop editor when a new source opens.
+    // A blanket "editing = false on any new source" is wrong: the crop preview goes
+    //   startScreenCapture() -> openSourceUri() emits this signal synchronously
+    //   -> dialogHost.startScreenCrop() sets editing = true right after
+    // so assigning false (synchronously or via callLater) killed the crop box that had
+    // just been opened. Let `ready` decide instead: it already means
+    // hasSource && !openingSource && sourceKind==="screen", so it turns false exactly when
+    // a non-screen source opens, and stays true during the crop preview.
     Connections {
-        target: veyra
-        // 关闭屏幕裁剪编辑态。必须延后一帧：mediaOpenRequested 是在 openPath() 里
-        // 同步发出的，此刻原生视频窗口正在重建，直接赋值 editing 会让五处绑定
-        // （maskInput / 控件条 / 快捷键 / 鼠标区）在同一帧重算，Qt 6 在那种状态下
-        // 重建 item 树会解引用空指针（0xC0000005 @ Qt6Qml.dll）。
-        function onMediaOpenRequested() { Qt.callLater(function() { screenCrop.editing = false }) }
+        target: screenCrop
+        function onReadyChanged() { if (!screenCrop.ready && screenCrop.editing) screenCrop.editing = false }
     }
     MouseArea {
         id: maskInput
