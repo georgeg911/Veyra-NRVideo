@@ -186,6 +186,14 @@ void QmlPlayerBridge::tickSubtitles() {
             for (const auto* cue : engine::cuesAt(track, at, 3)) {
                 SubtitleLine line;
                 line.text = cue->text; line.bitmap = cue->bitmap;
+                // B 站「中英双语」把中文和英文用一个 '\n' 拼在同一个 cue 里，
+                // 载入时 language 被置为 "both"。只有这条轨道才打双语标记，
+                // 渲染层据此把中文放大、英文缩小；普通多行字幕不打标记，保持单一字号。
+                // The Bilibili "Chinese + English" track joins both languages into one cue
+                // with a '\n' and sets language to "both" when loading. Only that track is
+                // flagged bilingual so the renderer enlarges Chinese and shrinks English;
+                // ordinary multi-line cues stay unflagged and keep a single size.
+                line.bilingual = track.language == L"both";
                 line.style = track.styles.empty() ? engine::SubtitleStyle{}
                            : track.styles[size_t(std::clamp(cue->style, 0, int(track.styles.size()) - 1))];
                 if (cue->alignOverride) line.style.alignment = cue->alignOverride;

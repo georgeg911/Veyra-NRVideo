@@ -37,8 +37,8 @@ std::wstring signatureOf(const std::vector<SubtitleLine>& lines,const SubtitleVi
     std::wstring signature;
     signature.reserve(lines.size()*64);
     for(const auto& line:lines){
-        signature+=std::format(L"{}:{}|{:08X}|{:08X}|{}:{}|{}|{}|{}|{}|",line.text.size(),line.text,line.style.primary,line.style.outline,line.style.font.size(),line.style.font,
-            line.style.size,line.style.alignment,line.alignOverride,line.secondary?1:0);
+        signature+=std::format(L"{}:{}|{:08X}|{:08X}|{}:{}|{}|{}|{}|{}|{}|",line.text.size(),line.text,line.style.primary,line.style.outline,line.style.font.size(),line.style.font,
+            line.style.size,line.style.alignment,line.alignOverride,line.secondary?1:0,line.bilingual?1:0);
         signature+=std::format(L"{}:{}:{}:{}|",reinterpret_cast<uintptr_t>(line.bitmap.get()),reinterpret_cast<uintptr_t>(line.ass.get()),line.posX,line.posY);
         const auto& s=line.style;
         signature+=std::format(L"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|",s.back,s.outlineWidth,s.shadow,s.marginL,s.marginR,s.marginV,s.bold,s.italic,s.background,s.font.size());
@@ -140,17 +140,18 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
                 continue;
             }
             if(line.text.empty())continue;
-            // 双语字幕（一个 cue 里 '\n' 分隔的两行）按语言给出不同字号：
-            // 第一行是中文（同时也是主语言），放大一点；第二行是英文译文，缩小一点。
-            // 两行同字号时英文看起来比中文「重」，因为它更宽、占的横向面积更大，
-            // 视觉上会抢掉中文那一行。
-            // Bilingual cues (two lines joined by '\n' in one cue) get different sizes per
-            // language: the first line is Chinese (also the primary language) and is enlarged,
-            // the second is the English translation and is shrunk. At equal sizes the English
-            // line looks heavier simply because it is wider, and it visually steals attention
-            // from the Chinese one.
+            // 双语字幕按语言给出不同字号：第一行中文（也是主语言）放大一点，
+            // 第二行英文译文缩小一点。两行同字号时英文看起来比中文「重」，因为它
+            // 更宽、占的横向面积更大，视觉上会抢掉中文那一行。
+            // 是否双语由数据层显式标记（line.bilingual），不能靠「含 '\n'」推断：
+            // 普通多行字幕同样含换行，那样会被误拆成一大一小。
+            // Bilingual cues get different sizes per language: the Chinese line is
+            // enlarged, the English translation shrunk. At equal sizes the English line
+            // looks heavier because it is wider. The flag comes from the data layer
+            // (line.bilingual) rather than from "contains '\n'", because an ordinary
+            // multi-line cue contains one too and must keep a single size.
             const size_t newlinePos=line.text.find(L'\n');
-            const bool bilingualCue=newlinePos!=std::wstring::npos&&newlinePos+1<line.text.size();
+            const bool bilingualCue=line.bilingual&&newlinePos!=std::wstring::npos&&newlinePos+1<line.text.size();
             Line entry;
             entry.path=std::make_unique<Gdiplus::GraphicsPath>();
             entry.style=line.style;
@@ -182,6 +183,27 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
             // GraphicsPath so the stacking logic places them as two blocks; lines inside one
             // path can only share a single font size.
             const bool positioned=line.posX>=0&&line.posY>=0;
+            // 显式「按行数适配」（fitToLines）：原先把整条 cue 一起量、缩到不超过
+            // targetLines 行高。拆分成两个块之后，必须先在整条 cue 的文本上求出这个
+            // 缩放比，再把同一个比值套给每一块；否则「按行数适配」这个选项会失效。
+            // Explicit fit-to-lines used to measure the whole cue and shrink it until it
+            // fitted targetLines. After splitting into blocks the ratio must be computed on
+            // the whole cue text first and then applied to each block, or the option silently
+            // stops working.
+            double fitScale=1.0;
+            if(!positioned&&view.fitToLines&&view.targetLines>0){
+                const float minimum=float(dip(h,10));
+                const float initial=float(dip(h,logicalSize));
+                float size=initial;
+                for(int attempt=0;attempt<24&&size>minimum;++attempt){
+                    Font font(use,size,toFontStyle(entry.style.bold,entry.style.italic),UnitPixel);
+                    RectF bounds;
+                    graphics.MeasureString(line.text.c_str(),int(line.text.size()),&font,RectF(0,0,layoutWidth,1e7f),&format,&bounds);
+                    if(bounds.Height<=font.GetHeight(&graphics)*view.targetLines+1)break;
+                    size=std::max(minimum,size*.9f);
+                }
+                if(initial>0)fitScale=double(size/std::max(1.0f,initial));
+            }
             std::wstring primaryText=line.text;
             std::wstring secondaryText;
             if(bilingualCue){
@@ -193,7 +215,7 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
                 target.style=entry.style;
                 const auto& renderText=textOverride;
                 const float availableWidth=positioned?layoutWidth:std::max(1.0f,layoutWidth-float(dip(h,std::max(0.0,target.style.marginL)+std::max(0.0,target.style.marginR))));
-                float fontPixels=float(dip(h,logicalSize*sizeScale));
+                float fontPixels=float(dip(h,logicalSize*sizeScale*fitScale));
                 auto measureOne=[&](float size){Font font(use,size,toFontStyle(target.style.bold,target.style.italic),UnitPixel);RectF bounds;
                     graphics.MeasureString(renderText.c_str(),int(renderText.size()),&font,RectF(0,0,availableWidth,1e7f),&format,&bounds);return bounds;};
                 // 宽度约束：长行不能横向冲出画面（英文往往比中文宽得多）。

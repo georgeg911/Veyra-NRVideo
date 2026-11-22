@@ -47,7 +47,15 @@ int wmain(int argc,wchar_t** argv){
     auto inkBands=[&](){std::vector<int> heights;int run=0;for(int y=0;y<imageHeight;++y){bool ink=false;for(int x=0;x<imageWidth;++x)ink|=(pixels[size_t(y)*imageWidth+x]>>24)>30;if(ink)++run;else if(run){heights.push_back(run);run=0;}}if(run)heights.push_back(run);return heights;};
     updateSubtitleOverlay(overlay,{stable},view);const auto one=inkBands();
     stable.text=L"HHHH\nHHHH";updateSubtitleOverlay(overlay,{stable},view);const auto two=inkBands();
+    // 普通多行字幕（未标记 bilingual）必须保持单一字号；含 '\n' 本身不代表双语。
+    // An ordinary multi-line cue (not flagged bilingual) must keep one glyph size;
+    // containing '\n' does not by itself mean the cue is bilingual.
     check(one.size()==1&&two.size()==2&&std::abs(one[0]-two[0])<=1&&std::abs(one[0]-two[1])<=1,"two-line cue preserves one-line glyph size even with target one");
+    // 显式标记双语后，中文放大、英文缩小：两行墨迹高度必须不同。
+    // Flagged bilingual, Chinese is enlarged and English shrunk: the two ink bands must differ.
+    stable.bilingual=true;updateSubtitleOverlay(overlay,{stable},view);const auto bilingual=inkBands();
+    check(bilingual.size()==2&&bilingual[0]>bilingual[1]+1,"flagged bilingual cue enlarges the Chinese line over the English one");
+    stable.bilingual=false;
     stable.text=L"HHHH, HHHH\nHHHH, HHHH\nHHHH, HHHH";
     updateSubtitleOverlay(overlay,{stable},view);
     check(inkBands().size()==3,"three authored lines with commas survive the real glyph renderer");

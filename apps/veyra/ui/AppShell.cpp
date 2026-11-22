@@ -788,6 +788,13 @@ if(screenFill&&currentFile.starts_with(L"screen:")&&s.running){
                 line.posX=cue->posX>=0?cue->posX/std::max(1.0,track.scriptWidth):-1.0;
                 line.posY=cue->posY>=0?cue->posY/std::max(1.0,track.scriptHeight):-1.0;
                 line.secondary=secondary;
+                // B 站「中英双语」轨道在载入时把 language 置为 "both"，一个 cue 里用
+                // '\n' 拼中文和英文。只有它打双语标记，渲染层才会把中文放大、英文缩小；
+                // 普通多行字幕不打标记，保持原来的单一字号。
+                // The Bilibili bilingual track sets language to "both" and joins Chinese and
+                // English with '\n' inside one cue. Only it is flagged, so the renderer enlarges
+                // Chinese and shrinks English; ordinary multi-line cues keep one size.
+                line.bilingual=track.language==L"both";
                 draw.push_back(std::move(line));
             }
         };

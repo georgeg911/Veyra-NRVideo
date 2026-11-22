@@ -19,6 +19,14 @@ struct SubtitleLine {
     int alignOverride=0;               // {\anN}, 0 = style alignment
     double posX=-1,posY=-1;            // {\pos(x,y)} normalised to 0..1 (or -1)
     bool secondary=false;
+    // 双语提示：第 0 行是中文、第 1 行是英文译文，由提供方显式标记。
+    // 不能用「文本里含 '\n'」来判断——自带多行的普通字幕（ASS 的 \N、SRT 的
+    // 两行文本）同样含换行，那样会被误当成双语，两行被改成一大一小。
+    // Bilingual hint: line 0 is Chinese, line 1 is the English translation, marked
+    // explicitly by the producer. Inferring it from "contains '\n'" is wrong: an
+    // ordinary multi-line cue (ASS \N, a two-line SRT entry) also contains one and
+    // would then be drawn with two different sizes.
+    bool bilingual=false;
     std::shared_ptr<const engine::SubtitleBitmapFrame> bitmap;
     // ASS/SSA track drawn by libass (builds that link it): the whole script is
     // rendered at assTimeMs inside the video area; `text` is only diagnostics.
