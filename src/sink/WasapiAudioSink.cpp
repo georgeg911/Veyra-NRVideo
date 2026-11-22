@@ -42,6 +42,15 @@ bool AudioPipeline::open(const std::wstring& path,const std::atomic<bool>* cance
     // this one has to do the same. Starting a second thread over a live one is what
     // surfaced as "bad allocation" when a DASH source re-opened its audio address.
     if(thread_.joinable())return false;
+    // 重连进来时必须先清掉上一次 stopThread() 留下的取消标志。open() 把 &stopFlag_
+    // 挂到 FFmpeg 的 interrupt_callback 上，而 stopThread() 把它置成了 true；不复位
+    // 的话 avformat_open_input 会在第一次回调时就被自己中断（实测返回 AVERROR_EXIT），
+    // 重连永远失败、镜像轮换一行有效代码都走不到。此刻线程已 join，复位是安全的。
+    // A reopen has to clear the cancellation flag its own stopThread() left behind:
+    // open() hands &stopFlag_ to FFmpeg's interrupt_callback, so leaving it set made
+    // every reopen abort at avformat_open_input with AVERROR_EXIT. No thread is
+    // running at this point, so resetting it here is safe.
+    stopFlag_=false;
     damagedSkipCount_=0;readFailureRun_=0;
     // 上一次播放的缓冲状态不能残留到这一次，否则新音轨一上来就被判成「要暂停」。
     // The previous playback's buffering state must not leak into this one, or the new

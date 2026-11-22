@@ -235,8 +235,12 @@ void QmlPlayerBridge::tickPlaylist() {
     // new file, or live source selected in between must cancel auto-advance.
     QTimer::singleShot(0, this, [this, session = s.sessionId] {
         const auto latest = impl_->engine.snapshot();
+        // 不再用 liveKind 判断：站点页面播放时 liveKind 也是 "url"，那会让自动下一集
+        // 永远不触发。playlistSession == session 已经足够说明「这个会话是列表里的条目」。
+        // No liveKind test here: it is "url" for a site page too, which made auto-advance
+        // impossible. playlistSession == session already means "this session is a list entry".
         if (impl_->playlistSession == session && latest.sessionId == session &&
-            latest.transport == T::Ended && !latest.failed && !latest.image && impl_->liveKind.isEmpty())
+            latest.transport == T::Ended && !latest.failed && !latest.image)
             impl_->playlist->advanceAfterEnd();
     });
 }
@@ -565,6 +569,23 @@ void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& 
     // and inserting rows makes the QML playlist view rebuild while the native video
     // window is being re-created. That combination crashed in Qt6Qml before 2a6051b1.
     QTimer::singleShot(0, this, [this, parts, currentUrl]() {
+        // 顺序很重要：先按「本次全部 parts」清理旧视频，再做去重添加。
+        // 反过来的话，已存在的分集会被去重过滤掉、随后又被 drop 删走，而且不会再
+        // 加回来，列表就从 N 集塌成 1 集（合集的每个分集是不同 BV，最容易被误删）。
+        // Order matters: prune against the whole part list first, then de-duplicate and
+        // add. The other way round, already-present episodes were filtered out by
+        // dedupe, then deleted by the prune, and never re-added - an N-episode list
+        // collapsed to one row (a collection is many BVs, so this hit hardest).
+        QStringList keepPaths;
+        keepPaths.reserve(parts.size() + 1);
+        keepPaths << currentUrl;
+        for (const auto& part : parts) {
+            if (!part.url.trimmed().isEmpty()) keepPaths << part.url;
+        }
+        const int before = impl_->playlist->count();
+        impl_->playlist->retainSiteVideos(keepPaths);
+        const int dropped = before - impl_->playlist->count();
+
         QStringList urls;
         QHash<QString, QString> names;
         for (const auto& part : parts) {
@@ -573,26 +594,25 @@ void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& 
             urls << part.url;
             if (!part.title.trimmed().isEmpty()) names.insert(part.url, part.title.trimmed());
         }
-        if (!urls.isEmpty()) {
-            // A new video replaces the previous one's parts. Without this the list grew
-            // a block per video sent, mixing several series together and burying the
-            // entry that is playing. Local files are left alone (see the model).
-            const int before = impl_->playlist->count();
-            impl_->playlist->dropOtherSiteVideos(currentUrl);
-            const int dropped = before - impl_->playlist->count();
-            impl_->playlist->addPathsWithNames(urls, names);
-            veyra::log::info("bilibili", std::format(
-                "queued {} part(s) from the page DOM (titles included), dropped {} old page(s)",
-                urls.size(), dropped));
-        }
+        if (!urls.isEmpty()) impl_->playlist->addPathsWithNames(urls, names);
+        veyra::log::info("bilibili", std::format(
+            "queued {} part(s) from the page DOM (titles included), dropped {} old page(s)",
+            urls.size(), dropped));
         // Highlight the part that is actually playing. addPathsWithNames() only queues
         // a job, so the row does not exist yet on the first pass; and when the video is
         // already queued (playing P10 after P4) there is nothing to add at all. Both
         // cases need the retry below: it stops as soon as the row can be found.
         auto* playlist = impl_->playlist;
         auto attempts = std::make_shared<int>(0);
+        // 用 weak_ptr 打破自引用环：lambda 需要能重新排定自己，但如果它按值持有自己
+        // 的 shared_ptr，引用计数永远归零不了（重试结束后整份闭包 + URL 都泄漏）。
+        // weak_ptr 让重试链在放弃时自然释放。
+        // Break the self-reference: the lambda must be able to re-arm itself, but holding
+        // its own shared_ptr by value keeps the refcount above zero forever - the closure
+        // and its URL leaked after every send. A weak_ptr lets the chain die on give-up.
         auto highlight = std::make_shared<std::function<void()>>();
-        *highlight = [this, playlist, currentUrl, attempts, highlight]() {
+        std::weak_ptr<std::function<void()>> weakHighlight = highlight;
+        *highlight = [this, playlist, currentUrl, attempts, weakHighlight]() {
             // Match by what identifies the video, not by exact string: the address the
             // extension sent may carry tracking parameters that the queued entries do
             // not, and query-item order is not stable. setPlayback then needs the
@@ -603,7 +623,9 @@ void QmlPlayerBridge::queueWebParts(const QList<WebPart>& parts, const QString& 
                 return;
             }
             if (++*attempts >= 60) return;   // ~3 s; give up quietly
-            QTimer::singleShot(50, this, *highlight);
+            QTimer::singleShot(50, this, [this, weakHighlight]() {
+                if (const auto alive = weakHighlight.lock()) (*alive)();
+            });
         };
         // The first pass runs immediately: on the already-queued path (sending another
         // episode of the same collection) there is nothing to add, the row already
@@ -635,16 +657,16 @@ void QmlPlayerBridge::queueBilibiliParts(const std::vector<std::wstring>& partTi
     // native video window is being re-created is what crashed in Qt6Qml. One
     // event-loop turn later the open has settled and the rebuild is safe.
     QTimer::singleShot(0, this, [this, urls, current]() {
+        // 与 DOM 路径同样的顺序：先按本次全部分集清理，再去重添加。
+        // Same order as the DOM path: prune against the whole part list, then dedupe.
+        impl_->playlist->retainSiteVideos(urls);
         QStringList fresh;
         for (const auto& url : urls) {
             if (url.trimmed().isEmpty()) continue;
             if (impl_->playlist->indexOfPath(url) >= 0) continue;
             fresh << url;
         }
-        if (fresh.isEmpty()) return;
-        // Same as the DOM path: a new video replaces the previous one's parts.
-        impl_->playlist->dropOtherSiteVideos(urls.value(current - 1));
-        impl_->playlist->addPaths(fresh);
+        if (!fresh.isEmpty()) impl_->playlist->addPaths(fresh);
         // Mark the part that is actually playing, so auto-advance continues from
         // there instead of jumping back to page 1.
         impl_->playlist->setPlayback(urls.value(current - 1), QStringLiteral("playing"));

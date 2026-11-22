@@ -64,7 +64,16 @@ public:
     // `path` points at, keeping local files untouched. Used when a new multi-part
     // video is sent: the previous video's parts would otherwise pile up and bury the
     // one that is playing.
-    void dropOtherSiteVideos(const QString& path);
+    // 只保留这些站点地址所属的「视频」，删掉其它站点条目；本地文件永远不动。
+    // 合集是多个不同 BV，所以这里必须接收完整的一组地址，不能只给一个 currentUrl：
+    // 否则同合集里除当前集以外的分集会被当成「别的视频」删掉，而它们通常已被去重
+    // 过滤、不会再加回来，列表就从 N 集塌成 1 集。
+    // Keep only the videos these site addresses belong to, dropping other site entries;
+    // local files are never touched. A collection is several different BVs, so the caller
+    // has to pass the whole set - given just currentUrl, the other episodes look like
+    // "another video", get deleted, and are not re-added because dedupe already skipped
+    // them, collapsing an N-episode list to one row.
+    void retainSiteVideos(const QStringList& keepPaths);
     Q_INVOKABLE bool play(int row);
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();

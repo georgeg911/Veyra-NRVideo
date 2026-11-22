@@ -757,11 +757,21 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
         protocolQuality = query.queryItemValue(QStringLiteral("quality")).toInt();
         const auto packed = query.queryItemValue(QStringLiteral("parts"), QUrl::FullyDecoded);
         for (const auto& line : packed.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            // 从右往左切：URL 里未编码的 '|' 不可能存在（encodeURIComponent 把它编成
+            // %7C），所以最后一个字段一定是 URL，中间全部属于标题。B 站标题含 '|' 很
+            // 常见（"第1讲 | 导论"），从左切会把标题截断、把 URL 污染掉。
+            // Split from the right: an unescaped '|' cannot appear in the URL
+            // (encodeURIComponent emits %7C), so the last field is the URL and
+            // everything between belongs to the title. Bilibili titles do contain '|',
+            // and splitting from the left truncated the title and corrupted the URL.
             const auto fields = line.split(QLatin1Char('|'));
             if (fields.size() < 3) continue;
-            const int page = fields.at(0).toInt();
+            const int page = fields.first().toInt();
             if (page < 1) continue;
-            protocolParts.append({page, fields.at(1), fields.mid(2).join(QLatin1Char('|'))});
+            const QString partUrl = fields.last();
+            const QString partTitle = fields.mid(1, fields.size() - 2).join(QLatin1Char('|'));
+            if (partUrl.isEmpty()) continue;
+            protocolParts.append({page, partTitle, partUrl});
         }
         break;
     }

@@ -108,7 +108,12 @@ QVariant PlaylistModel::data(const QModelIndex& index, int role) const {
     const bool network = isNetworkPath(entry.path);
     switch (role) {
     case Qt::DisplayRole: case NameRole: return entry.name;
-    case PathRole: return QDir::toNativeSeparators(entry.path);
+    // 网络地址不能过 toNativeSeparators：Windows 上它会把 // 变成 \\，QML 拿这个
+    // 变形串去 indexOfPath 就再也对不上，选中后的回车播放 / 删除 / 拖动排序全部失效。
+    // A URL must not go through toNativeSeparators: on Windows it turns the slashes into
+    // backslashes, and QML then feeds that mangled string to indexOfPath - which no longer
+    // matches, so select-then-play / delete / drag-reorder silently stop working.
+    case PathRole: return network ? entry.path : QDir::toNativeSeparators(entry.path);
     // A site page has no file size and no modified time; showing "0 字节 · 1970-01-01"
     // reads like a broken file. Say what it actually is.
     case SizeRole: return network ? tr("网络视频") : QLocale().formattedDataSize(entry.size);
@@ -328,29 +333,32 @@ QString PlaylistModel::pathAtRow(int row) const {
     if (row < 0 || row >= count()) return {};
     return entries_[row].path;
 }
-void PlaylistModel::dropOtherSiteVideos(const QString& path) {
-    // Identify the video by host + path (the BV id). Everything else that is a site
-    // page belongs to an earlier video and is removed; local files are never touched,
-    // so a mixed list keeps its own entries.
-    const QUrl keep(path, QUrl::StrictMode);
-    if (!keep.isValid() || keep.host().isEmpty()) return;
-    // Trailing slash is not significant here either: /video/BVxxxx and /video/BVxxxx/
-    // are the same page, and Bilibili uses both.
+void PlaylistModel::retainSiteVideos(const QStringList& keepPaths) {
+    // 按 host + path 识别「同一个视频」，保留集合由调用方给全（合集是多个 BV）。
+    // 本地文件不在处理范围内。尾斜杠不表意：/video/BVxxx 与 /video/BVxxx/ 是同一页。
+    // Identify a video by host + path; the caller supplies the whole keep set (a
+    // collection is many BVs). Local files are left alone. Trailing slash is not
+    // significant - Bilibili uses both spellings for one page.
     const auto pathOf = [](const QUrl& url) {
         QString p = url.path();
         while (p.endsWith(QLatin1Char('/'))) p.chop(1);
         return p;
     };
-    const auto keepPath = pathOf(keep);
+    QSet<QString> keepKeys;
+    for (const auto& path : keepPaths) {
+        const QUrl url(path, QUrl::StrictMode);
+        if (!url.isValid() || url.host().isEmpty()) continue;
+        keepKeys.insert(url.host().toLower() + pathOf(url));
+    }
+    if (keepKeys.isEmpty()) return;
     std::vector<int> doomed;
     for (int i = 0; i < count(); ++i) {
         const auto& entry = entries_[i];
         if (!isNetworkPath(entry.path)) continue;          // local file: keep
         const QUrl candidate(entry.path, QUrl::StrictMode);
         if (!candidate.isValid()) continue;
-        const bool sameVideo = candidate.host().compare(keep.host(), Qt::CaseInsensitive) == 0 &&
-                               pathOf(candidate) == keepPath;
-        if (!sameVideo) doomed.push_back(i);
+        const auto key = candidate.host().toLower() + pathOf(candidate);
+        if (!keepKeys.contains(key)) doomed.push_back(i);
     }
     if (doomed.empty()) return;
     // Remove back to front so the earlier indices stay valid.
@@ -380,7 +388,10 @@ bool PlaylistModel::play(int row) {
 bool PlaylistModel::playFrom(int row, int direction) {
     for (; row >= 0 && row < count(); row += direction) {
         // Skip missing entries without opening a failed engine session for each.
-        if (QFileInfo(entries_[row].path).isFile()) return play(row);
+        // 网络条目（播放列表里的 B 站分集/直链）没有文件可 stat，交给引擎去判断；
+        // 只对本地路径做存在性检查。
+        const auto& path = entries_[row].path;
+        if (isNetworkPath(path) || QFileInfo(path).isFile()) return play(row);
     }
     return false;
 }
