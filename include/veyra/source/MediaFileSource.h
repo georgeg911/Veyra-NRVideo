@@ -156,6 +156,12 @@ private:
     pipeline::DoviFrameInfo doviFrameInfo{};   // Dolby Vision L1 (RPU), invalid unless present
     // Damaged data tolerance (network sources, MPEG-TS) and buffering reads.
     bool nonBlocking_=false,tolerant_=false,waitKeyframe_=false,pendingDiscontinuity_=false;
+    // C 档：宽松参数是「严格打不开之后」才用的，这种情况下即使 desc.tolerateCorruption
+    // 为 false 也要宽容播放，否则重试成功了却立刻因为一个坏包停住。
+    // Tier C: lenient options were only used because the strict open failed. Playback must
+    // stay tolerant then, even if desc.tolerateCorruption is false, or the successful retry
+    // would stop on the first bad packet anyway.
+    bool tolerantByFallback_=false;
     media::CorruptPolicy corruptPolicy_=media::CorruptPolicy::Conceal;
     uint64_t corruptPacketsSeen_=0,corruptFramesSeen_=0,decoderErrorsSeen_=0;
     std::chrono::steady_clock::time_point lastReadCall_{},noOutputSince_{},lastCorruptLog_{},lastForcedReconnect_{},errorWindowStart_{},waitKeyframeSince_{};

@@ -121,7 +121,7 @@ bool FFmpegDemuxer::openShared(std::shared_ptr<DemuxSession> session)
     return true;
 }
 
-bool FFmpegDemuxer::open(const std::wstring& path,const std::atomic<bool>* cancelled)
+bool FFmpegDemuxer::open(const std::wstring& path,const std::atomic<bool>* cancelled,bool tolerate)
 {
     if (opened()) {
         close();
@@ -141,6 +141,23 @@ bool FFmpegDemuxer::open(const std::wstring& path,const std::atomic<bool>* cance
     raw->interrupt_callback={InputInterrupt::callback,&interrupt_};
     AVDictionary* options=nullptr;
     if(network)networkMediaOptions(&options);
+    // A 档容错：让 FFmpeg 把「坏数据」当成可跳过的噪声，而不是整个输入无效。
+    // 默认的 err_detect 会在第一次遇到坏包/坏索引时让 avformat_open_input 或
+    // av_read_frame 直接失败，表现就是「文件损坏，无法播放」——哪怕 99% 的数据是好的。
+    // ignore_err 让解复用层继续往下走；discardcorrupt 让解出的坏帧被丢弃而不是送进解码器。
+    // 两者都是 FFmpeg 官方文档里的选项，mpv 用的是同一组（--demuxer-lavf-o=err_detect=ignore_err）。
+    // 只在 tolerateCorruption 时开启：正常文件不需要，开着反而可能吞掉真实的格式错误。
+    // Tier A resilience: make FFmpeg treat bad bytes as skippable noise instead of an
+    // invalid input. The default err_detect fails the whole open/read on the first bad
+    // packet, which reports "corrupted file, cannot play" even when 99% of it is fine.
+    // ignore_err keeps the demuxer walking; discardcorrupt drops the bad frames instead of
+    // feeding them to the decoder. Both are documented FFmpeg options, and mpv uses the
+    // same pair (--demuxer-lavf-o=err_detect=ignore_err). Enabled only when tolerance was
+    // requested: a healthy file does not need it and it could swallow real format errors.
+    if (tolerate) {
+        av_dict_set(&options,"err_detect","ignore_err",0);
+        av_dict_set(&options,"discardcorrupt","1",0);
+    }
     interrupt_.armConnect();
     const int openResult = avformat_open_input(&raw, utf8Path.c_str(), nullptr, &options);
     av_dict_free(&options);

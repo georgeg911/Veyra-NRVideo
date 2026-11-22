@@ -356,6 +356,17 @@ void QmlPlayerBridge::openPath(const QString& path) {
     options.network.autoReconnect=impl_->prefBool("networkAutoReconnect",true);
     options.network.timeshiftSeconds=impl_->prefInt("networkTimeshift",0);
     options.network.corrupt=media::corruptPolicyFromId(impl_->prefString("networkCorrupt").toStdString());
+    // 本地文件的损坏容错档位（B/C 档）。读在打开时，和上面的网络选项一样：
+    // 改了设置要重新打开文件才生效。
+    // Tolerance level for damaged local files (tiers B/C). Read at open, like the network
+    // options above: a change takes effect the next time a file is opened.
+    {
+        // 0=严格 1=自动 2=始终宽松，取值与 source::DamagedFilePolicy 一致。
+        // 0=strict 1=auto 2=always, matching source::DamagedFilePolicy.
+        const auto policy=impl_->prefString("damagedFilePolicy");
+        options.damagedFilePolicy=policy==QLatin1String("always")?2u
+                                :policy==QLatin1String("auto")?1u:0u;
+    }
     impl_->engine.open(impl_->videoWindow, wide, options);
     impl_->openingSessionId = impl_->engine.snapshot().sessionId;
     // 播放列表状态跟踪：站点页面（B 站视频，现在每个分集都是列表条目）需要它，

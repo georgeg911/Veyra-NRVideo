@@ -937,6 +937,9 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
     requireHardwareDecode_ = desc.requireHardwareDecode;
     nonBlocking_ = desc.nonBlocking;
     corruptPolicy_ = desc.network.corrupt;
+    // 枚举嵌套在 SourceOpenDesc 里，取个别名免得每处都写全限定名。
+    // The enum lives inside SourceOpenDesc; alias it so the call sites stay readable.
+    using DamagedPolicy = DamagedFilePolicy;
     resetCorruptionState();
     if (media::sharedDemuxInput(desc.path, desc.nonBlocking)) {
         // Network addresses and files on a server: one connection, read ahead of playback,
@@ -953,13 +956,49 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
             veyra::log::error("source-file", "shared demux session open failed");
             return false;
         }
-    } else if (!demuxer_.open(desc.path,cancelled_)) {
-        veyra::log::error("source-file", "demuxer open failed");
-        return false;
+    } else {
+        // 本地文件：按用户的「损坏文件容错」设置决定宽松还是严格。
+        // 网络源和 MPEG-TS 一直宽容（会丢数据的链路），离线消费者（导出、工具）
+        // 保持严格——它们要的是「数据不对就报错」，不是「尽量播下去」。
+        // Local files: leniency follows the user's damaged-file setting. Network sources and
+        // MPEG-TS stay tolerant (lossy links by nature), and offline consumers (export,
+        // tools) stay strict - they want "tell me the data is wrong", not "keep going".
+        const bool lenientLocal = desc.damagedFilePolicy == DamagedPolicy::Always;
+        const bool autoLocal = desc.damagedFilePolicy == DamagedPolicy::Auto;
+        const bool opened = demuxer_.open(desc.path,cancelled_,lenientLocal || autoLocal);
+        if (!opened) {
+            if (autoLocal) {
+                // C 档（自动降级）：严格打开失败后，用宽松参数再试一次。
+                // mpv 也是这个思路：默认解复用器报损坏时换 --demuxer=+lavf 重试，
+                // 实测损坏的 MKV 排在严格模式下打不开、宽松模式能正常播。
+                // Tier C (automatic fallback): when the strict open fails, retry once with the
+                // lenient parameters. mpv does the same - when its default demuxer reports a
+                // damaged file it retries with --demuxer=+lavf, which plays files the strict
+                // path refuses.
+                veyra::log::warn("source-file",
+                    "strict demux open failed; retrying with err_detect=ignore_err (damaged-file fallback)");
+                // 宽松重试：把「严格失败」这件事本身变成可恢复的信号。
+                demuxer_.close();
+                if (!demuxer_.open(desc.path,cancelled_,true)) {
+                    veyra::log::error("source-file", "demuxer open failed even with damaged-file tolerance");
+                    return false;
+                }
+                tolerantByFallback_ = true;
+            } else {
+                veyra::log::error("source-file", "demuxer open failed");
+                return false;
+            }
+        }
     }
     // Damaged data is tolerated on the player's network sources and MPEG-TS; export
-    // and every offline user keep the strict stop.
-    tolerant_ = desc.tolerateCorruption && (media::networkMediaInput(desc.path) || demuxer_.formatName().find("mpegts") != std::string::npos);
+    // and every offline user keep the strict stop. Local files join them when the user
+    // asked for damaged-file tolerance, or when the lenient retry is what got us open.
+    tolerant_ = desc.tolerateCorruption &&
+                (media::networkMediaInput(desc.path) ||
+                 demuxer_.formatName().find("mpegts") != std::string::npos ||
+                 desc.damagedFilePolicy == DamagedPolicy::Always ||
+                 desc.damagedFilePolicy == DamagedPolicy::Auto);
+    if (tolerantByFallback_) tolerant_ = true;
     veyra::log::info("source-file", "stage: demux opened, reading codec parameters");
     const AVCodecParameters* params = demuxer_.videoCodecParameters();
     if (params == nullptr) {

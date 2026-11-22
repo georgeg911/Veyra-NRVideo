@@ -609,6 +609,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 od.audioPath=options.audioPath;
                 od.nonBlocking=!isCapture;
                 od.tolerateCorruption=!isCapture;
+                // 损坏文件容错只给播放器：导出/离线消费者要的是「数据不对就报错」，
+                // 静默跳过坏包会让它们产出一个自己都不知道有缺口的文件。
+                // Damaged-file tolerance is for playback only: export and offline consumers
+                // want a hard error, because silently skipping bad packets would produce a
+                // file with gaps nobody was told about.
+                od.damagedFilePolicy=isCapture?source::DamagedFilePolicy::Off:source::DamagedFilePolicy(options.damagedFilePolicy);
                 // Files use the same shared D3D12 device as the graph-> Capture
                 // uses it for the compressed-payload decoder (H.264/HEVC/AV1/
                 // VP9 through D3D12VA; MJPEG stays on the software path inside

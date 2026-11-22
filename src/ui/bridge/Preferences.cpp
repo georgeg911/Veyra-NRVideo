@@ -310,6 +310,14 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         const QString v = value.toString();
         if (v != QLatin1String("conceal") && v != QLatin1String("keyframe")) return false;
         stored = v;
+    } else if (key == QLatin1String("damagedFilePolicy")) {
+        // How tolerant to be with damaged / partial *local* files.
+        // off = stop on bad data (original behaviour), auto = retry leniently only when the
+        // strict open fails, always = skip bad data from the start.
+        const QString v = value.toString();
+        if (v != QLatin1String("off") && v != QLatin1String("auto") && v != QLatin1String("always"))
+            return false;
+        stored = v;
     } else if (key == QLatin1String("rememberPosition") || key == QLatin1String("dockPinned")) {
         stored = value.toBool();
     } else if (key == QLatin1String("updateDownloadRoute")) {

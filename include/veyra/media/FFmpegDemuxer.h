@@ -36,7 +36,13 @@ public:
     FFmpegDemuxer(const FFmpegDemuxer&) = delete;
     FFmpegDemuxer& operator=(const FFmpegDemuxer&) = delete;
 
-    bool open(const std::wstring& path,const std::atomic<bool>* cancelled=nullptr);
+    // tolerate=true 时用宽松的 err_detect（坏包跳过而不是整个输入失败），
+    // 用于「文件损坏也要能播未损坏部分」的场景。默认 false 保持严格，免得
+    // 正常文件里的真实格式错误被静默吞掉。
+    // tolerate=true switches to a lenient err_detect (skip bad packets instead of failing
+    // the whole input), for "play the intact part of a damaged file". Defaults to false to
+    // keep strict behaviour so genuine format errors on healthy files stay visible.
+    bool open(const std::wstring& path,const std::atomic<bool>* cancelled=nullptr,bool tolerate=false);
     // Shared mode: packets and stream parameters come from the session.
     bool openShared(std::shared_ptr<DemuxSession> session);
     void close();

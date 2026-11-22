@@ -506,6 +506,32 @@ VPage {
                             }
                         }
                         VRow {
+                            // 本地文件的容错档位。默认「严格」——坏数据就报错，这是原行为。
+                            // 「自动」只在严格打开失败时才用宽松参数重试一次（mpv 的思路）。
+                            // 「始终宽松」则直接跳过坏包继续播，适合没下完的文件。
+                            // Tolerance level for local files. "严格" is the original behaviour
+                            // (a bad packet stops playback). "自动" retries once with lenient
+                            // options only when the strict open fails (mpv's approach).
+                            // "始终宽松" skips bad packets from the start - good for partial files.
+                            label: qsTr("损坏文件容错")
+                            hint: {
+                                const id = veyra.preferences.damagedFilePolicy || "off"
+                                if (id === "always")
+                                    return qsTr("始终宽松 = 跳过坏数据继续播，画面可能出现花屏；适合没下载完或不完整的文件")
+                                if (id === "auto")
+                                    return qsTr("自动 = 文件打不开时才用宽松方式重试一次；正常文件不受影响")
+                                return qsTr("严格 = 遇到损坏数据就停止（默认）；本地视频打不开时可以试试上面两档")
+                            }
+                            VSeg {
+                                objectName: "set-damaged-file-policy"
+                                options: [{ id: "off", label: qsTr("严格") },
+                                          { id: "auto", label: qsTr("自动") },
+                                          { id: "always", label: qsTr("始终宽松") }]
+                                current: veyra.preferences.damagedFilePolicy || "off"
+                                onPicked: id => veyra.setPreference("damagedFilePolicy", id)
+                            }
+                        }
+                        VRow {
                             label: qsTr("HDR 亮度曲线") + " / " + qsTr("HDR 元数据")
                             VButton {
                                 objectName: "set-hdr-advanced-toggle"

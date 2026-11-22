@@ -53,6 +53,13 @@ struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t f
     bool deinterlace=true; // automatic file deinterlace, preserves progressive bypass
     bool hardwareDecodeOnly=false; // user setting "强制硬解": files fail instead of falling back to software
     media::NetworkSettings network; // buffering / reconnect / damaged-picture choices for network sources and servers
+    // 本地文件的损坏容错档位（设置 → 播放 → 损坏文件容错）。
+    // 存成 0/1/2 而不是枚举类型：EngineController.h 不该为了一个开关去 include source
+    // 层的头文件（那个头文件被大量引用，牵动编译面积）。取值见 source::DamagedFilePolicy。
+    // Tolerance for damaged local files (Settings -> Playback -> damaged-file tolerance).
+    // Stored as 0/1/2 instead of the enum type so this header does not have to pull in the
+    // source layer's header just for one switch. Values match source::DamagedFilePolicy.
+    uint8_t damagedFilePolicy = 0;
     // Separate audio address for a DASH source (Bilibili): the video container has
     // no audio track, so the audio pipeline opens this instead.
     std::wstring audioPath;

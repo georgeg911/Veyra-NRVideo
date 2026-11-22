@@ -18,6 +18,16 @@ namespace veyra::source {
 
 namespace pipeline = veyra::pipeline;
 
+// 损坏/不完整文件的容错档位。本地文件默认严格（坏一个包就整段停），这个开关让它
+// 也能像 mpv / VLC 那样跳过坏数据继续播。
+// Damage tolerance for damaged or partial files. Local playback is strict by default (one bad
+// packet stops it); this lets it skip bad data and keep going, like mpv and VLC do.
+enum class DamagedFilePolicy : uint8_t {
+    Off = 0,      // 严格：坏数据即停止（原行为）
+    Auto = 1,     // 仅在严格打开失败时，用宽松参数重试一次
+    Always = 2,   // 始终宽松
+};
+
 struct SourceOpenDesc {
     std::wstring path;
     bool preferHardwareDecode = true; // hardware first, software fallback explicit
@@ -40,6 +50,9 @@ struct SourceOpenDesc {
     media::NetworkSettings network;   // the user's buffering / reconnect / damaged-picture choices
     bool nonBlocking = false;         // player: read() may return Waiting while the network buffers
     bool tolerateCorruption = false;  // player: keep going through damaged packets (network sources, MPEG-TS)
+    // 本地文件的损坏容错档位，见上面命名空间级的 DamagedFilePolicy。
+    // Tolerance for local files; see the namespace-level DamagedFilePolicy above.
+    DamagedFilePolicy damagedFilePolicy = DamagedFilePolicy::Off;
     // Extra HTTP request headers for a network source, one "Name: value" per line.
     // Some CDNs (Bilibili's among them) reject a media request without the site's
     // Referer, so a resolved stream URL is not usable on its own.
