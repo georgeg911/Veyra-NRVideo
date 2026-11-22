@@ -162,6 +162,17 @@ private:
     // stay tolerant then, even if desc.tolerateCorruption is false, or the successful retry
     // would stop on the first bad packet anyway.
     bool tolerantByFallback_=false;
+    // 损坏文件容错：连续坏包时整段往后跳，而不是逐个丢弃。步长、次数都有界。
+    // Damaged-file tolerance: jump past a whole bad stretch instead of dropping packets one by
+    // one. Both the step and the attempt count are bounded.
+    int damageJumpCount_=0;
+    // 解码器静默丢包时，靠这两个量判断「是不是正卡在空洞里」。
+    // When the decoder silently drops packets these two tell us "we are stuck in a hole".
+    uint64_t lastDroppedPackets_=0;
+    uint64_t droppedInWindow_=0;
+    std::chrono::steady_clock::time_point dropWindowStart_{};
+    static constexpr int64_t kSkipStepUs_=30'000'000;   // 每次跳 30 秒
+    static constexpr int kMaxDamageJumps=200;           // 最多跳 200 次（约 100 分钟素材）
     media::CorruptPolicy corruptPolicy_=media::CorruptPolicy::Conceal;
     uint64_t corruptPacketsSeen_=0,corruptFramesSeen_=0,decoderErrorsSeen_=0;
     std::chrono::steady_clock::time_point lastReadCall_{},noOutputSince_{},lastCorruptLog_{},lastForcedReconnect_{},errorWindowStart_{},waitKeyframeSince_{};

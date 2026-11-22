@@ -682,6 +682,34 @@ bool FFmpegVideoDecoder::sendPacket(const AVPacket* packet)
     if (result == AVERROR_EOF && packet == nullptr) return true;
     if (result < 0) {
         lastError_ = result;
+        // 损坏文件容错：这一个包坏了不等于整条流坏了。AVERROR_INVALIDDATA 是
+        // avcodec_send_packet 对「这不像是本编解码器的数据」的返回，正是没下完/中间
+        // 有空洞的文件会给出的结果。容忍模式下把它当成「丢掉这一包」，返回成功，
+        // 让调用方继续喂后面的包——否则上层一次 send 失败就终止整段播放，
+        // 表现就是「宽松模式还是解码失败」。
+        // Damaged-file tolerance: one bad packet does not mean the stream is broken.
+        // AVERROR_INVALIDDATA is what avcodec_send_packet returns for "this does not look
+        // like my codec's data", which is exactly what a partially downloaded file with
+        // holes produces. In tolerant mode treat it as "drop this packet" and report
+        // success so the caller keeps feeding later packets - otherwise one failed send
+        // ends playback, which reads as "lenient mode still fails to decode".
+        if (tolerateBadPackets_ && result == AVERROR_INVALIDDATA) {
+            ++stats_.badPacketsDropped;
+            // 坏包之后解码器的参考帧链是脏的，不清掉会让后续正常帧也解不出来（花屏或
+            // 干脆没有输出）。flush 只重置解码器内部状态，不丢帧、不改 skip_frame——
+            // 比 recoverAtKeyframe() 温和（那个只收关键帧，会跳掉大量正常画面）。
+            // After a bad packet the reference chain is dirty; leaving it makes later good
+            // frames decode wrong or not at all. flush resets decoder state only - it drops
+            // no frames and does not touch skip_frame, unlike recoverAtKeyframe() which
+            // would discard everything except keyframes.
+            avcodec_flush_buffers(context_);
+            if (++errorLogs_ <= 5 || errorLogs_ % 100 == 0) {
+                log::warn("media", std::format(
+                    "decoder: dropped a damaged packet (so far {}); continuing",
+                    errorLogs_));
+            }
+            return true;
+        }
         // Damaged network data fails often; log the first few and then a sample.
         if (++errorLogs_ <= 5 || errorLogs_ % 100 == 0) {
             char errorText[AV_ERROR_MAX_STRING_SIZE]{};

@@ -999,6 +999,10 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
                  desc.damagedFilePolicy == DamagedPolicy::Always ||
                  desc.damagedFilePolicy == DamagedPolicy::Auto);
     if (tolerantByFallback_) tolerant_ = true;
+    veyra::log::info("damaged-file", std::format(
+        "tolerant={} tolerateCorruption={} policy={} fallback={} format={}",
+        tolerant_, desc.tolerateCorruption, int(desc.damagedFilePolicy),
+        tolerantByFallback_, demuxer_.formatName()));
     veyra::log::info("source-file", "stage: demux opened, reading codec parameters");
     const AVCodecParameters* params = demuxer_.videoCodecParameters();
     if (params == nullptr) {
@@ -1051,6 +1055,18 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
         veyra::log::error("source-file", "decoder open failed");
         close();
         return false;
+    }
+    // 宽容播放时让解码器自己跳过坏包。这一步是必需的第二半：只放宽解复用
+    // （err_detect=ignore_err）不够，因为没下完的文件会给出「看起来不像本编解码器」
+    // 的包，avcodec_send_packet 直接返回 AVERROR_INVALIDDATA，上层一次失败就终止整段
+    // 播放。现场 2026-11-22 实测：宽松模式下仍然 "decoder: send_packet failed code=-1094995529"。
+    // Tolerant playback needs this second half: relaxing the demuxer alone is not enough.
+    // A partially downloaded file yields packets that do not look like this codec, so
+    // avcodec_send_packet returns AVERROR_INVALIDDATA and one failure ends playback.
+    // Measured 2026-11-22: lenient mode still reported "send_packet failed code=-1094995529".
+    if (tolerant_) {
+        decoder_.setTolerateBadPackets(true);
+        veyra::log::info("source-file", "damaged-file tolerance: decoder will drop bad packets and continue");
     }
 
     info_ = SourceInfo{};
@@ -1382,6 +1398,51 @@ readAgain:   // a damaged picture was dropped (corrupt policy WaitKeyframe): fet
         // decoder has one frame of head start; otherwise the decoded EL frame lags
         // the base frame and stale residuals land on the picture.
         lastFrameHadEnhancementLayer = feedEnhancementLayer(packet);
+        // 容错模式下解码器会静默吸收坏包（返回 true），上层因此看不出「正卡在空洞里」。
+        // 这里自己盯丢包计数的增长：连续丢得太多就整段往后跳，而不是一帧一帧硬扛——
+        // 一个稀疏文件的空洞能有上万个坏包，逐个丢永远走不出去。
+        // In tolerant mode the decoder silently absorbs bad packets (returns true), so the
+        // caller cannot see "we are stuck in a hole". Watch the counter here instead: too many
+        // drops in a row means jump past the whole stretch, because one hole in a sparse file
+        // holds tens of thousands of bad packets and dropping them one by one never gets out.
+        if (tolerant_) {
+            const uint64_t dropped = decoder_.stats().badPacketsDropped;
+            if (dropped != lastDroppedPackets_) {
+                const uint64_t delta = dropped - lastDroppedPackets_;
+                lastDroppedPackets_ = dropped;
+                droppedInWindow_ += delta;
+                const auto nowDrop = std::chrono::steady_clock::now();
+                if (dropWindowStart_ == std::chrono::steady_clock::time_point{}) dropWindowStart_ = nowDrop;
+                if (nowDrop - dropWindowStart_ > std::chrono::seconds(2)) {
+                    dropWindowStart_ = nowDrop;
+                    droppedInWindow_ = delta;
+                }
+                if (droppedInWindow_ >= 400) {
+                    // 基准取「解复用器当前所在位置」，不是 lastPtsUs_：后者在 seek 之后是
+                    // INT64_MIN，会让跳转算成从 0 秒起跳（实测跳到 30 秒而不是 5030 秒）。
+                    // Base the jump on where the demuxer actually is, not on lastPtsUs_: the
+                    // latter is INT64_MIN right after a seek, which made the jump start from
+                    // zero (measured: landed at 30 s instead of 5030 s).
+                    const int64_t fromUs = demuxer_.positionUs() >= 0 ? demuxer_.positionUs()
+                                          : (lastPtsUs_ != INT64_MIN ? lastPtsUs_ : 0);
+                    const int64_t nextUs = fromUs + kSkipStepUs_;
+                    if (++damageJumpCount_ <= kMaxDamageJumps && demuxer_.seekToUs(nextUs, /*byUser=*/true)) {
+                        veyra::log::warn("source-file", std::format(
+                            "damaged hole: {} packets dropped in 2 s; jumped {:.0f} s ahead to {:.1f} s (jump #{}/{})",
+                            droppedInWindow_, kSkipStepUs_ / 1e6, nextUs / 1e6, damageJumpCount_, kMaxDamageJumps));
+                        droppedInWindow_ = 0;
+                        dropWindowStart_ = {};
+                        startKeyframeWait();
+                        resumeAfterUs_ = INT64_MIN;
+                        lastPtsUs_ = INT64_MIN;
+                        ++epoch_;
+                        continue;
+                    }
+                    if (damageJumpCount_ > kMaxDamageJumps)
+                        veyra::log::error("source-file", std::format("giving up after {} damaged holes", kMaxDamageJumps));
+                }
+            }
+        }
         if (!decoder_.sendPacket(packet)) {
             if (tolerant_ && tolerateDecoderError()) {
                 continue;
@@ -1933,7 +1994,39 @@ bool MediaFileSource::tolerateDecoderError()
         errorsInWindow_ = 0;
     }
     ++decoderErrorsSeen_;
+    // 损坏文件容错：解码器连续拒绝大量包，说明我们正停在一个空洞里，而不是「解码器坏了」。
+    // 原来 2 秒内超过 12 次就判定解码失败、整段停止——这正是「宽松模式照样播不下去」的原因：
+    // 稀疏文件的一段空洞会有成千上万个坏包，靠逐个丢弃永远走不出去。
+    // 现在改成主动往后跳一段（跳过整个空洞），跳完继续播。
+    // Damaged-file tolerance: a decoder rejecting many packets in a row means we are sitting
+    // in a hole, not that the decoder broke. This used to declare a decoder failure after 12
+    // errors in 2 s and stop - exactly why "lenient mode still will not play": one hole in a
+    // sparse file produces thousands of bad packets, and dropping them one by one never
+    // gets through. Jump past the whole hole instead, then keep playing.
     if (++errorsInWindow_ > 12) {
+        if (tolerant_) {
+            const int64_t fromUs = lastPtsUs_ != INT64_MIN ? lastPtsUs_ : 0;
+            const int64_t nextUs = fromUs + kSkipStepUs_;
+            if (++damageJumpCount_ <= kMaxDamageJumps) {
+                veyra::log::warn("source-file", std::format(
+                    "damaged hole: {} packets rejected in 2 s; jumping {:.0f} s ahead to {:.1f} s (jump #{}/{})",
+                    errorsInWindow_, kSkipStepUs_ / 1e6, nextUs / 1e6, damageJumpCount_, kMaxDamageJumps));
+                if (demuxer_.seekToUs(nextUs, /*byUser=*/true)) {
+                    errorsInWindow_ = 0;
+                    decoderErrorsSeen_ = 0;
+                    startKeyframeWait();
+                    resumeAfterUs_ = INT64_MIN;
+                    lastPtsUs_ = INT64_MIN;
+                    ++epoch_;
+                    return true;   // 告诉调用方继续读，不要停
+                }
+                veyra::log::error("source-file", "could not jump past the damaged hole");
+            } else {
+                veyra::log::error("source-file", std::format(
+                    "giving up after {} damaged holes", kMaxDamageJumps));
+            }
+            return false;
+        }
         veyra::log::warn("source-file", std::format("decoder rejected {} packets within 2 s; treating it as a decoder failure", errorsInWindow_));
         return false;
     }
@@ -1981,7 +2074,7 @@ bool MediaFileSource::seek(const pipeline::Rational& targetSeconds)
         return false;
     }
     const int64_t targetUs = rationalToUs(targetSeconds);
-    if (!demuxer_.seekToUs(targetUs)) { return false; }
+    if (!demuxer_.seekToUs(targetUs, /*byUser=*/true)) { return false; }
         // Custom (P5): the enhancement decoder keeps state across a seek too, and a
         // stale reference chain there produces garbage on the first new frame.
         if (elLayerOpen_) elDecoder_.flushBuffers();

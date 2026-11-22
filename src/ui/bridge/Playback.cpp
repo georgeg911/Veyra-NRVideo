@@ -246,6 +246,8 @@ void QmlPlayerBridge::tickPlaylist() {
 }
 
 void QmlPlayerBridge::openPath(const QString& path) {
+    veyra::log::info("ui-open", std::format("openPath called len={} tail={}",
+        path.size(), path.right(40).toStdString()));
     if (path.isEmpty()) return;
     // A veyra:// request is an instruction for this program, not a file: FFmpeg has no
     // such protocol and failed with "Protocol not found". The protocol handler has
@@ -364,6 +366,7 @@ void QmlPlayerBridge::openPath(const QString& path) {
         // 0=严格 1=自动 2=始终宽松，取值与 source::DamagedFilePolicy 一致。
         // 0=strict 1=auto 2=always, matching source::DamagedFilePolicy.
         const auto policy=impl_->prefString("damagedFilePolicy");
+        veyra::log::info("damaged-file", std::format("policy read from prefs: '{}'", policy.toStdString()));
         options.damagedFilePolicy=policy==QLatin1String("always")?2u
                                 :policy==QLatin1String("auto")?1u:0u;
     }

@@ -58,7 +58,16 @@ class InputInterrupt {
 public:
     void configure(bool network,const std::atomic<bool>* owner,const std::atomic<bool>* local=nullptr,bool live=false){network_=network;owner_=owner;local_=local;live_=live;deadline_=0;}
     // Read / seek deadline.
+    // 本地文件默认不给 deadline（本地磁盘读本该是即时的）。但损坏/稀疏文件是个例外：
+    // seek 要扫过成片的空洞，没有上限就会把读取线程（以及等它的主循环）卡住几十秒。
+    // 用 armBounded() 给这条路径一个有限预算。
+    // A local file normally gets no deadline (local reads are meant to be immediate). Damaged
+    // or sparse files are the exception: a seek has to scan across long holes, and without a
+    // limit it blocks the read thread - and the main loop waiting on it - for tens of seconds.
+    // armBounded() gives that path a finite budget.
     void arm(){deadline_=network_?now()+int64_t(live_?kReadTimeoutLiveMs:kReadTimeoutVodMs)*1000000ll:0;}
+    void armBounded(){deadline_=now()+int64_t(kBoundedSeekMs)*1000000ll;}
+    static constexpr int kBoundedSeekMs = 1500;
     void armConnect(){deadline_=network_?now()+int64_t(kConnectTimeoutMs)*1000000ll:0;}
     // 重连路径：用短预算，别把主循环冻住几十秒。
     // Reconnect path: a short budget so the main loop is not frozen for tens of seconds.

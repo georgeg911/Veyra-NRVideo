@@ -18,6 +18,32 @@ extern "C" {
 namespace veyra::media {
 
 namespace {
+// 清掉 AVIOContext 上的粘性错误状态。
+//
+// FFmpeg 的 AVIOContext 记着两个「一旦置位就一直有效」的标志：
+//   pb->eof_reached  读到过 EOF
+//   pb->error        读过失败
+// 它们不会因为一次成功的 seek 而自动复位，于是出现「跳到完好区域也读不出来」：
+// av_read_frame 会立刻把那个陈旧的错误再抛一次。没下完的文件读过一个空洞之后，
+// 整条流就再也读不动了——正是因为这两个标志粘住了。
+// mpv 在它的 libavformat 解复用层里做的同一件事（demux_lavf.c 的
+// "Clear sticky EOF/error to reuse this demuxer"）。
+//
+// Clear the sticky error state on the AVIOContext.
+//
+// FFmpeg's AVIOContext remembers two flags that stay set once raised:
+//   pb->eof_reached  an EOF was seen
+//   pb->error        a read failed
+// A successful seek does not reset them, so "seek into an intact region still reads
+// nothing": av_read_frame immediately re-raises the stale error. After reading across one
+// hole in a partially downloaded file the whole stream becomes unreadable - exactly
+// because these two flags stick. mpv does the same thing in its libavformat demuxer
+// (demux_lavf.c, "Clear sticky EOF/error to reuse this demuxer").
+void clearAvioError(AVFormatContext* context) {
+    if (context == nullptr || context->pb == nullptr) return;
+    context->pb->eof_reached = 0;
+    context->pb->error = 0;
+}
 // Custom (P5): count the HEVC layers inside one access unit. Dolby Vision
 // Profile 7 carries the enhancement layer as a second NAL layer inside the same
 // access unit; the hardware decoder drops it, so this is the only proof that the
@@ -157,6 +183,11 @@ bool FFmpegDemuxer::open(const std::wstring& path,const std::atomic<bool>* cance
     if (tolerate) {
         av_dict_set(&options,"err_detect","ignore_err",0);
         av_dict_set(&options,"discardcorrupt","1",0);
+        // 读失败时跳过一段继续读，而不是结束整条流（见 readVideoPacket 的错误分支）。
+        // Skip a stretch on a read failure instead of ending the stream (see the error
+        // branch in readVideoPacket).
+        tolerant_ = true;
+        damageSkips_ = 0;
     }
     interrupt_.armConnect();
     const int openResult = avformat_open_input(&raw, utf8Path.c_str(), nullptr, &options);
@@ -193,6 +224,25 @@ bool FFmpegDemuxer::open(const std::wstring& path,const std::atomic<bool>* cance
     context_ = raw;
     videoStreamIndex_ = streamIndex;
     stats_ = DemuxerStats{};
+    // 打开过程本身可能已经在 AVIOContext 上留下错误/EOF 状态（探流信息时读到坏数据）；
+    // 容错模式从干净状态开始。
+    // Opening may already have left an error/EOF state on the AVIOContext while probing;
+    // tolerant playback starts from a clean one.
+    if (tolerant_) {
+        clearAvioError(raw);
+        // 测试钩子：跳到指定秒数再开始，用来验证「空洞区能否跳过」。
+        // Test hook: start at a given second so "can a hole be skipped" is testable
+        // without waiting for playback to walk there naturally.
+        if (const char* at = std::getenv("VEYRA_TEST_SEEK_TO_SEC")) {
+            const int64_t targetUs = int64_t(std::atof(at) * 1e6);
+            if (targetUs > 0) {
+                const int64_t ts = av_rescale_q(targetUs, { 1, 1000000 }, AVRational{1, AV_TIME_BASE});
+                const int rc = av_seek_frame(raw, -1, ts, AVSEEK_FLAG_BACKWARD);
+                clearAvioError(raw);
+                log::warn("media", std::format("test: start seek to {} s rc={}", targetUs / 1e6, rc));
+            }
+        }
+    }
     const AVStream* stream = raw->streams[streamIndex];
     log::info("media", std::format("demuxer: opened codecId={} streams={} videoStream={} durationUs={} timeBase={}/{}",
         static_cast<int>(stream->codecpar->codec_id), raw->nb_streams, streamIndex,
@@ -423,15 +473,77 @@ bool FFmpegDemuxer::readVideoPacket(bool& endOfFile)
         const int result = av_read_frame(context_, packet_);
         interrupt_.disarm();
         if (result == AVERROR_EOF) {
+            // 容错模式下 EOF 未必是真的结束。没下完的文件里，空洞区读出来全零，
+            // 解复用器找不到下一个合法包，就直接报 EOF —— 但对用户来说后面还有数据。
+            // 这里往后跳一段再看：能读出包就继续，跳满预算还读不到才认作真的结束。
+            // In tolerant mode EOF is not necessarily the end. In a partially downloaded
+            // file a hole reads as all-zero bytes, the demuxer finds no next packet and
+            // reports EOF - while real data exists further on. Walk forward: if a packet
+            // turns up, continue; give up only when the skip budget is spent.
+            if (tolerant_ && damageSkips_ < kMaxDamageSkips) {
+                clearAvioError(context_);
+                const int64_t fromUs = packetAtUs_ >= 0 ? packetAtUs_ : 0;
+                const int64_t nextUs = fromUs + kDamageSkipStepUs;
+                ++damageSkips_;
+                if (damageSkips_ <= 5 || damageSkips_ % 20 == 0) {
+                    log::warn("media", std::format(
+                        "demuxer: EOF at {:.1f} s but tolerance is on; probing {:.1f} s (skip #{}/{})",
+                        fromUs / 1e6, nextUs / 1e6, damageSkips_, kMaxDamageSkips));
+                }
+                if (seekToUs(nextUs)) continue;
+            }
             endOfFile = true;
             return false;
         }
         if (result < 0) {
+            // 损坏文件容错：解复用错误的正确处理不是放弃整条流，而是跳过这一段继续
+            // 往后读。没下完/中间有空洞的文件会连续返回错误（空洞区读出来是零字节，
+            // 形不成合法包），一次错误就停等于整段播不了。
+            // 这里按 seek 推进：跳过一个可配置的步长再读，最多重试 N 次；步长和次数
+            // 都要有界，否则一个彻底坏掉的文件会让我们在这里空转很久。
+            // Damaged-file tolerance: the right reaction to a demux error is to skip that
+            // stretch and keep reading, not to abandon the stream. A partially downloaded
+            // file returns errors in a row over its holes (all-zero bytes never form a valid
+            // packet), so stopping on the first one means nothing plays.
+            // Advance by seek instead: skip a step and retry, bounded in both step size and
+            // attempt count, or a hopelessly broken file would spin here for a long time.
+            if (tolerant_) {
+                // 错误已经发生，先把它从 AVIOContext 上清掉，否则接下来的 seek 会把
+                // 这个旧错误继续抛出来。
+                // The error already happened: clear it off the AVIOContext first, or the
+                // upcoming seek keeps re-raising the stale one.
+                clearAvioError(context_);
+                if (++damageSkips_ <= kMaxDamageSkips) {
+                    ++stats_.damagedRegionsSkipped;
+                    const int64_t stepUs = kDamageSkipStepUs;
+                    const int64_t nowUs = packetAtUs_ >= 0 ? packetAtUs_ : 0;
+                    const int64_t nextUs = nowUs + stepUs;
+                    if (damageSkips_ <= 5 || damageSkips_ % 20 == 0) {
+                        char errorText[AV_ERROR_MAX_STRING_SIZE]{};
+                        av_strerror(result, errorText, sizeof(errorText));
+                        log::warn("media", std::format(
+                            "demuxer: damaged region (code={} text={}); skipping {:.1f} s ahead to {:.1f} s (skip #{}/{})",
+                            result, errorText, stepUs / 1e6, nextUs / 1e6,
+                            damageSkips_, kMaxDamageSkips));
+                    }
+                    if (seekToUs(nextUs)) continue;   // 从跳过后的位置重新读
+                    // seek 本身失败（比如超出时长）：不再重试，按原样报错。
+                    log::error("media", "demuxer: could not skip past the damaged region");
+                } else {
+                    log::error("media", std::format(
+                        "demuxer: giving up after {} damaged regions", kMaxDamageSkips));
+                }
+            }
             char errorText[AV_ERROR_MAX_STRING_SIZE]{};
             av_strerror(result, errorText, sizeof(errorText));
             log::error("media", std::format("demuxer: av_read_frame failed code={} text={}", result, errorText));
             return false;
         }
+        // 记下当前位置，供「跳过损坏区段」决定从哪里往后跳。
+        // Remember where we are so "skip the damaged stretch" knows where to jump from.
+        if (tolerant_ && packet_->stream_index == videoStreamIndex_ && packet_->pts != AV_NOPTS_VALUE)
+            packetAtUs_ = av_rescale_q(packet_->pts, context_->streams[videoStreamIndex_]->time_base,
+                                       AVRational{1, 1000000}) - startTimeUs();
         if (packet_->stream_index != videoStreamIndex_) {
             if (elStreamIndex_ >= 0 && packet_->stream_index == elStreamIndex_) {
                 // Bounded: when the layer runs ahead of the base stream the queue
@@ -526,8 +638,9 @@ FFmpegDemuxer::ReadResult FFmpegDemuxer::readVideoPacketEx(int waitMs, bool hono
     return ReadResult::Error;
 }
 
-bool FFmpegDemuxer::seekToUs(int64_t targetUs)
+bool FFmpegDemuxer::seekToUs(int64_t targetUs,bool byUser)
 {
+    if(byUser)damageSkips_=0;   // 用户 seek：重置跳过预算
     if (session_) {
         if (!session_->seek(targetUs)) {
             log::error("media", std::format("demuxer: session seek failed targetUs={}", targetUs));
@@ -549,7 +662,12 @@ bool FFmpegDemuxer::seekToUs(int64_t targetUs)
     elPending_.clear();
     const int64_t target = av_rescale_q(targetUs + startTimeUs(), { 1, 1000000 },
         AVRational{1, AV_TIME_BASE});
-    interrupt_.arm();
+    // 容错模式下 seek 要扫过空洞，必须给预算：无上限会把读取线程卡几十秒，
+    // 主循环在等它，表现就是画面冻住（实测 engine-hang 8 秒、帧率掉到 50）。
+    // Tolerant seeks scan across holes and need a budget: unbounded blocking stalls the read
+    // thread for tens of seconds while the main loop waits (measured: 8 s engine-hang,
+    // frame rate down to 50).
+    if (tolerant_) interrupt_.armBounded(); else interrupt_.arm();
     const int result = av_seek_frame(context_, -1, target, AVSEEK_FLAG_BACKWARD);
     interrupt_.disarm();
     if (result < 0) {
@@ -558,6 +676,20 @@ bool FFmpegDemuxer::seekToUs(int64_t targetUs)
         log::error("media", std::format("demuxer: seek failed targetUs={} code={} text={}", targetUs, result, errorText));
         return false;
     }
+    // 记录 seek 落点，容错模式下如果这里读不出东西，就从这儿继续往后找可用区域。
+    // Remember where the seek landed: in tolerant mode a hole here means "walk forward
+    // from this point until something readable turns up".
+    packetAtUs_ = targetUs;
+    // 注意：这里**不**重置 damageSkips_。跳过损坏区段内部也是走 seekToUs 的，
+    // 在这里清零会让「跳过预算」永远用不完——一个彻底坏掉的文件就这么死循环下去。
+    // 由用户手动 seek 时在上层重置（见 setUserSeek / 打开时初始化）。
+    // NOTE: damageSkips_ is deliberately NOT reset here. Our own skip logic goes through
+    // seekToUs too, so clearing it would make the skip budget infinite and a hopeless file
+    // would loop forever. A user seek resets it at the call site instead.
+    // 用户手动 seek、以及自动跳过损坏区段，都要清掉粘性错误，否则跳到完好区域也读不出来。
+    // A manual seek - and our own skip past a damaged region - must clear the sticky error,
+    // or reading from an intact position still fails.
+    clearAvioError(context_);
     return true;
 }
 

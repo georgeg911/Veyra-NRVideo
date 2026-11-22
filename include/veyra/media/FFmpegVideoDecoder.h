@@ -33,6 +33,9 @@ struct DecoderStats {
     int64_t lastPts = 0;
     uint64_t ptsNonMonotonicCount = 0;
     uint64_t pixelReadbackCount = 0; // software decode uploads only; always 0 on the GPU path
+    // 损坏文件容错模式下被丢弃的坏包数量（正常模式下恒为 0，坏包会让发送失败）。
+    // Damaged packets dropped in tolerant mode (always 0 otherwise: a bad packet fails).
+    uint64_t badPacketsDropped = 0;
 };
 
 enum class DecodeReceiveStatus { NeedInput, Frame, EndOfStream, Error };
@@ -120,6 +123,13 @@ public:
     // AVERROR of the last failed sendPacket / receiveFrame (0 when none). Damaged
     // network data reports AVERROR_INVALIDDATA; the caller decides whether to skip it.
     int lastError() const { return lastError_; }
+    // 打开「跳过坏包」模式：sendPacket 遇到 AVERROR_INVALIDDATA 时不再返回失败，
+    // 而是把损失记进 stats_ 并当作这一包被丢弃。用于损坏/不完整文件的宽容播放。
+    // Enable "skip bad packets": sendPacket no longer fails on AVERROR_INVALIDDATA, it
+    // records the loss in stats_ and treats the packet as dropped. Used for tolerant
+    // playback of damaged or partial files.
+    void setTolerateBadPackets(bool on) { tolerateBadPackets_ = on; }
+    bool tolerateBadPackets() const { return tolerateBadPackets_; }
     const DecoderStats& stats() const { return stats_; }
 
     // True when the decoder is producing AV_PIX_FMT_D3D12 frames.
@@ -177,6 +187,14 @@ private:
     DecodeReceiveStatus receiveStatus_ = DecodeReceiveStatus::NeedInput;
     int lastError_ = 0;
     uint64_t errorLogs_ = 0;
+    // 损坏文件容错：AVERROR_INVALIDDATA / AVERROR_EXIT 这类「这一个包坏了」的错误，
+    // 不再让整条解码链失败，而是丢掉这个包继续解后面的。上层用来实现「播未损坏部分」。
+    // 默认关闭，保持「解码失败要报出来」的原行为。
+    // Damaged-file tolerance: per-packet errors like AVERROR_INVALIDDATA no longer fail the
+    // whole decode chain - the packet is dropped and later ones are still decoded. This is
+    // what lets the player show the intact part of a damaged file. Off by default so
+    // "decoding failed" stays visible for healthy inputs.
+    bool tolerateBadPackets_ = false;
     int frameTimeBaseNum_ = 0;
     int frameTimeBaseDen_ = 0;
     DecoderStats stats_{};

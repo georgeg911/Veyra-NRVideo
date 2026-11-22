@@ -68,7 +68,14 @@ struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t f
         PlayerOptions o;o.nr=s.nr;o.sr=s.sr;o.fg=s.multiplier>1;o.fgMultiplier=std::max(2u,s.multiplier);o.realtime=s.nrPolicy!=pipeline::NrSizePolicy::Native;o.settings=s;o.nodeOrder=order;
         // Per-open state that EnhancementSettings does not carry: a rebuild would
         // otherwise drop the DASH audio address and the site's request headers.
-        if(keep){o.audioPath=keep->audioPath;o.network.requestHeaders=keep->network.requestHeaders;o.network.userAgent=keep->network.userAgent;o.network.audioFallbacks=keep->network.audioFallbacks;}
+        // 打开时决定的选项也要一并保留：from() 是白名单，漏掉的字段会在下一次设置重建
+        // （切画质、改增强开关等）时被静默恢复成默认值。damagedFilePolicy 就是这么丢的
+        // ——设置里选了「始终宽松」，打开文件时却读到 policy=0，宽松模式形同虚设。
+        // Per-open options have to survive too: from() is a whitelist, so anything omitted
+        // here is silently reset to its default the next time settings rebuild (a quality
+        // change, an enhancement toggle...). That is how damagedFilePolicy got lost: the
+        // setting said "always" while the open saw policy=0 and never went lenient.
+        if(keep){o.audioPath=keep->audioPath;o.network.requestHeaders=keep->network.requestHeaders;o.network.userAgent=keep->network.userAgent;o.network.audioFallbacks=keep->network.audioFallbacks;o.damagedFilePolicy=keep->damagedFilePolicy;}
         return o;}
 };
 enum class TransportState { Empty, Opening, Playing, Paused, Ended, Stopping, Failed };
