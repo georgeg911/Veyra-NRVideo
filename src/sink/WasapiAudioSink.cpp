@@ -77,6 +77,17 @@ bool AudioPipeline::openImpl(const std::wstring& path,const std::atomic<bool>* l
     if(length<=0)return false;
     std::string narrow(static_cast<size_t>(length),'\0');
     WideCharToMultiByte(CP_UTF8,0,path.data(),static_cast<int>(path.size()),narrow.data(),length,nullptr,nullptr);
+    // 这里曾试过先 closeAll() 再分配，用来消除「每次重连泄漏一个 AVFormatContext」。
+    // 实测会崩：avcodec-63.dll 0xC0000005。原因是首次 open 时上一次会话的音频线程
+    // 未必已经退出（thread_.joinable() 只说明线程对象存在，不保证已 return），
+    // closeAll() 释放 codecCtx_ 时那条线程还在用。要修这个泄漏必须先保证线程已 join，
+    // 属于线程模型的改造，收益（每次重连几百字节）与风险不成比例，不做。
+    // This used to call closeAll() before allocating, to stop one AVFormatContext leaking per
+    // reconnect. Measured: it crashes in avcodec-63.dll (0xC0000005). The previous session's
+    // audio thread is not necessarily gone at the first open (thread_.joinable() only means
+    // the thread object exists, not that it returned), so freeing codecCtx_ pulled it out
+    // from under a live thread. Fixing that needs a thread-model change; the leak is a few
+    // hundred bytes per reconnect, not worth it.
     fmt_=avformat_alloc_context();
     if(!fmt_)return false;
     // 记下这是不是网络目标：B 站（DASH）的音轨是单独一条 CDN 请求，走这个重载，
